@@ -1,0 +1,29 @@
+{
+  "name": "multi-batch-migration",
+  "version": "1.0.0",
+  "description": "",
+  "type": "module",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "biome:check": "biome check .",
+    "biome:write": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@storacha/client": "^2.1.4",
+    "@storacha/filecoin-pin-migration": "^1.1.0",
+    "viem": "^2.50.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "vitest": "^3.2.4"
+  }
+}

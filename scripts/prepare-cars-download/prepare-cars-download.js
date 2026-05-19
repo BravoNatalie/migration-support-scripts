@@ -230,9 +230,7 @@ export function buildDownloadRecords({ spaceDID, inventory }) {
     if (existing.sizeBytes !== shard.sizeBytes) {
       throw new Error(`prepareCarsDownload: shard ${shard.cid} has inconsistent sizeBytes values`)
     }
-    if (existing.sourceURL !== shard.sourceURL) {
-      throw new Error(`prepareCarsDownload: shard ${shard.cid} has inconsistent sourceURL values`)
-    }
+    existing.sourceURL = selectPreferredSourceURL(existing.sourceURL, shard.sourceURL)
 
     const incomingPieceCID = 'pieceCID' in shard && typeof shard.pieceCID === 'string' ? shard.pieceCID : undefined
     if (existing.pieceCID && incomingPieceCID && existing.pieceCID !== incomingPieceCID) {
@@ -262,6 +260,27 @@ export function buildDownloadRecords({ spaceDID, inventory }) {
       roots: [...record.roots].sort(),
       from: record.seenFromShards && record.seenFromStore ? 'both' : record.seenFromShards ? 'shards' : 'shardsToStore',
     }))
+}
+
+/**
+ * @param {string} existingURL
+ * @param {string} incomingURL
+ */
+function selectPreferredSourceURL(existingURL, incomingURL) {
+  if (existingURL === incomingURL) return existingURL
+  if (isDirectR2URL(incomingURL) && !isDirectR2URL(existingURL)) return incomingURL
+  return existingURL
+}
+
+/**
+ * @param {string} sourceURL
+ */
+function isDirectR2URL(sourceURL) {
+  try {
+    return new URL(sourceURL).hostname.endsWith('.r2.w3s.link')
+  } catch {
+    return false
+  }
 }
 
 /**

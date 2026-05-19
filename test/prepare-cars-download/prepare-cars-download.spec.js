@@ -62,6 +62,52 @@ registerSuite('testPrepareCarsDownload', {
     assert.equal(records[1].from, 'shardsToStore')
   },
 
+  'buildDownloadRecords allows duplicate shard CIDs with different source URLs and prefers direct R2': () => {
+    const records = buildDownloadRecords({
+      spaceDID: 'did:key:zDownload',
+      inventory: {
+        did: 'did:key:zDownload',
+        uploads: ['root-a', 'root-b'],
+        shards: [
+          {
+            root: 'root-a',
+            cid: 'bafy-shared',
+            pieceCID: 'bafk-piece-1',
+            sourceURL: 'https://gateway.example.invalid/bafy-shared.car',
+            sizeBytes: 100n,
+          },
+        ],
+        shardsToStore: [
+          {
+            root: 'root-b',
+            cid: 'bafy-shared',
+            pieceCID: 'bafk-piece-1',
+            sourceURL: 'https://test.r2.w3s.link/bafy-shared.car',
+            sizeBytes: 100n,
+          },
+        ],
+        skippedUploads: [],
+        totalBytes: 100n,
+        totalSizeToMigrate: 100n,
+      },
+    })
+
+    assert.equal(records.length, 1)
+    assert.deepEqual(records[0], {
+      spaceDID: 'did:key:zDownload',
+      shardCid: 'bafy-shared',
+      pieceCID: 'bafk-piece-1',
+      sizeBytes: 100n,
+      sourceURL: 'https://test.r2.w3s.link/bafy-shared.car',
+      relativePath: path.join('cars', 'bafy-shared.car'),
+      roots: ['root-a', 'root-b'],
+      from: 'both',
+    })
+
+    const aria2 = serializeAria2Input('/tmp/download', records)
+    assert.match(aria2, /^https:\/\/test\.r2\.w3s\.link\/bafy-shared\.car\n/)
+  },
+
   'prepareCarsDownload writes manifests, skips complete files, and moves mismatches aside': async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'storacha-prepare-cars-'))
 

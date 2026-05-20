@@ -17,6 +17,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@filoz/synapse-core": "^0.5.2",
     "@storacha/client": "^2.1.4",
     "@storacha/filecoin-pin-migration": "^1.1.0",
     "viem": "^2.50.3",

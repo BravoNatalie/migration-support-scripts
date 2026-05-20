@@ -1,3 +1,10 @@
 node_modules
 .DS_Store
 .vscode
+
+# migration-repair local artifacts
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.patched.json

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@filoz/synapse-core':
+        specifier: ^0.5.2
+        version: 0.5.2(viem@2.50.3(zod@4.4.3))
       '@storacha/client':
         specifier: ^2.1.4
         version: 2.1.4(encoding@0.1.13)
@@ -249,6 +252,11 @@ packages:
 
   '@filoz/synapse-core@0.4.1':
     resolution: {integrity: sha512-Psj2YpIxNh+nxJN0wQdYMBTQRRhq1gR/C9kosI39Kx6y+lV8ppw02c6mPeHEaa47AG3KfUqQyMb3xqurOlwraQ==}
+    peerDependencies:
+      viem: 2.x
+
+  '@filoz/synapse-core@0.5.2':
+    resolution: {integrity: sha512-euxg/UhABStkXYJBft259V9KKNdzV/08NwfwIJnlhQnTJDu5suNXqZlP5QEDTdpMVtaCCfqEXJuPGqGZy6Nz6w==}
     peerDependencies:
       viem: 2.x
 
@@ -1388,6 +1396,21 @@ snapshots:
     transitivePeerDependencies:
       - typescript
 
+  '@filoz/synapse-core@0.5.2(viem@2.50.3(zod@4.4.3))':
+    dependencies:
+      '@web3-storage/data-segment': 5.3.0
+      dnum: 2.17.0
+      iso-web: 2.2.1
+      multiformats: 13.4.2
+      ox: 0.14.22(zod@4.4.3)
+      p-locate: 7.0.0
+      p-queue: 9.3.0
+      p-some: 7.0.0
+      viem: 2.50.3(zod@4.4.3)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - typescript
+
   '@filoz/synapse-sdk@0.40.4(viem@2.50.3(zod@4.4.3))':
     dependencies:
       '@filoz/synapse-core': 0.4.1(viem@2.50.3(zod@4.4.3))
@@ -1564,7 +1587,7 @@ snapshots:
 
   '@scure/bip32@1.7.0':
     dependencies:
-      '@noble/curves': 1.9.1
+      '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
       '@scure/base': 1.2.6
 

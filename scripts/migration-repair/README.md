@@ -32,12 +32,23 @@ node migration-repair.mjs validate  --input <state.json>
 node migration-repair.mjs manual    --input <state.json> [--threshold-bytes 1073741824] [--out manual.json]
 ```
 
+SQLite migration state files are also supported:
+
+```sh
+node migration-repair.mjs scan      --input state.db
+node migration-repair.mjs repiece   --input state.db --db repiece.sqlite --concurrency 8
+node migration-repair.mjs patch     --input state.db --db repiece.sqlite
+node migration-repair.mjs validate  --input state.db
+node migration-repair.mjs manual    --input state.db --out manual.json
+```
+
 - `scan` — count entries missing `pieceCID`, optionally write the work list.
 - `repiece` — download each missing shard from its carpark `sourceURL`,
   compute the `pieceCID`, store it in a SQLite checkpoint. Resumable; rerun to
   pick up where it left off.
 - `patch` — for every entry the checkpoint covers, fill `pieceCID` and move the
-  entry from `shardsToStore` into `shards`. Writes atomically to `--out`.
+  entry from `shardsToStore` into `shards`. JSON input writes atomically to
+  `--out`; SQLite input patches the migration DB in place.
 - `validate` — assert the state file has zero `shardsToStore`, every shard has
   a `pieceCID`, every shard has a `sourceURL`, and every `sizeBytes` is `> 0`.
   Exit code 1 if not migratable.
@@ -72,6 +83,11 @@ storacha space migrate --resume --state-file state.patched.json [...]
 
 # Optional: list the unrecoverable ones for manual handling
 node migration-repair.mjs manual --input state.patched.json --out manual.json
+
+# SQLite input follows the same flow, except patch runs in place
+node migration-repair.mjs patch \
+  --input state.db \
+  --db repiece.sqlite
 ```
 
 ## Requirements
@@ -92,10 +108,10 @@ node migration-repair.mjs manual --input state.patched.json --out manual.json
   indexing service on resume and overrides edits, this approach breaks.
 - **`skippedUploads` remain manual.** They have no `sourceURL`; we cannot
   reach the bytes.
-- **SQLite store path (storacha/upload-service#711) is not yet supported.**
-  Once the SQLite migration store lands upstream, this tool will need a
-  parallel read/write path. The checkpoint format here is unrelated — it's a
-  local SQLite file private to this tool.
+- **The repair checkpoint DB is separate from the migration state DB.**
+  `--db repiece.sqlite` stores only computed `pieceCID` results and failures
+  for this repair tool. When the input is a migration SQLite state file, the
+  `patch` step updates that migration DB in place.
 
 ## How `pieceCID` gets computed
 

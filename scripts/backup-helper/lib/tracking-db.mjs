@@ -73,13 +73,17 @@ export function openTrackingDb(dir) {
           upsert.run(row.shardCid, row.sourceUrl, row.sizeBytes, row.pieceCid)
           count++
           if (count % 50_000 === 0) {
-            renderProgressLine(`populate: ${count.toLocaleString()} input rows processed`)
+            renderProgressLine(`populate: ${count} input rows processed`)
           }
         }
         db.exec('COMMIT')
       } catch (err) {
         db.exec('ROLLBACK')
         throw err
+      }
+
+      if (count > 0 && count % 50_000 !== 0) {
+        renderProgressLine(`populate: ${count.toLocaleString()} input rows processed`)
       }
       if (process.stdout.isTTY) process.stdout.write('\n')
       return count

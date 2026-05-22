@@ -7,6 +7,7 @@
     "test": "test"
   },
   "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "biome:check": "biome check .",
     "biome:write": "biome check --write .",
     "format": "biome format --write .",

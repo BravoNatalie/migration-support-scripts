@@ -4,6 +4,73 @@ import process from 'node:process'
 import { z } from 'zod'
 
 // ---------------------------------------------------------------------------
+// Zod schemas
+// ---------------------------------------------------------------------------
+
+/**
+ * A decimal-string representation of a positive non-zero bigint (no leading
+ * zeros).  Stored on disk as a string because JSON cannot round-trip bigints.
+ */
+export const DecimalBigIntString = z
+  .string()
+  .regex(/^[1-9]\d*$/, 'must be a positive decimal integer string (no leading zeros)')
+
+/**
+ * Metadata sidecar written by export-upload-roots.
+ *
+ * @example { spaceDID: "did:key:z...", rootCount: 3, rootDigest: "abc..." }
+ */
+export const MetaSchema = z.object({
+  spaceDID: z.string().min(1),
+  rootCount: z
+    .number()
+    .int()
+    .min(0)
+    .refine((v) => Number.isSafeInteger(v), 'must be a safe integer'),
+  rootDigest: z.string().regex(/^[a-f0-9]{64}$/, 'must be a 64-char hex sha256'),
+})
+
+const BindingsCopySchema = z.object({
+  copyIndex: z.number().int(),
+  providerId: DecimalBigIntString,
+  serviceProvider: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'must be a 0x-prefixed 40-char hex address'),
+  providerURL: z.string().nullable(),
+  dataSetId: DecimalBigIntString,
+})
+
+/**
+ * Bindings file written by extract-bindings, consumed by prebuild-batch-states.
+ *
+ * Invariants enforced here:
+ * - exactly 2 copies
+ * - copy indexes are [0, 1]
+ * - providerIds are distinct
+ */
+export const BindingsFileSchema = z
+  .object({
+    version: z.literal(1),
+    spaceDID: z.string().min(1),
+    copies: z.array(BindingsCopySchema).length(2),
+  })
+  .superRefine((val, ctx) => {
+    const sorted = [...val.copies].sort((a, b) => a.copyIndex - b.copyIndex)
+    if (sorted[0].copyIndex !== 0 || sorted[1].copyIndex !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'copies must have copyIndex values [0, 1]',
+        path: ['copies'],
+      })
+    }
+    if (sorted[0].providerId === sorted[1].providerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'copies must have distinct providerId values',
+        path: ['copies'],
+      })
+    }
+  })
+
+// ---------------------------------------------------------------------------
 // Atomic file write
 // ---------------------------------------------------------------------------
 
@@ -95,31 +162,17 @@ export async function withRunDirLock(runDir, operation, action) {
 }
 
 // ---------------------------------------------------------------------------
-// Zod schemas
+// Queue descriptor helpers
 // ---------------------------------------------------------------------------
 
 /**
- * A decimal-string representation of a positive non-zero bigint (no leading
- * zeros).  Stored on disk as a string because JSON cannot round-trip bigints.
+ * @typedef {object} QueueDescriptor
+ * @property {1} version
+ * @property {string} batchId
+ * @property {import('@storacha/filecoin-pin-migration/types').SpaceDID} spaceDID
+ * @property {string} selectedRootsFile
+ * @property {string} stateFile
  */
-export const DecimalBigIntString = z
-  .string()
-  .regex(/^[1-9]\d*$/, 'must be a positive decimal integer string (no leading zeros)')
-
-/**
- * Metadata sidecar written by export-upload-roots.
- *
- * @example { spaceDID: "did:key:z...", rootCount: 3, rootDigest: "abc..." }
- */
-export const MetaSchema = z.object({
-  spaceDID: z.string().min(1),
-  rootCount: z
-    .number()
-    .int()
-    .min(0)
-    .refine((v) => Number.isSafeInteger(v), 'must be a safe integer'),
-  rootDigest: z.string().regex(/^[a-f0-9]{64}$/, 'must be a 64-char hex sha256'),
-})
 
 /**
  * Queue descriptor written into `queue/pending/<batch-id>.json` by
@@ -138,81 +191,6 @@ export const QueueDescriptorSchema = z.object({
     .min(1)
     .refine((v) => !path.isAbsolute(v), 'must be a relative path'),
 })
-
-const BindingsCopySchema = z.object({
-  copyIndex: z.number().int(),
-  providerId: DecimalBigIntString,
-  serviceProvider: z.string().regex(/^0x[a-fA-F0-9]{40}$/, 'must be a 0x-prefixed 40-char hex address'),
-  providerURL: z.string().nullable(),
-  dataSetId: DecimalBigIntString,
-})
-
-/**
- * Bindings file written by extract-bindings, consumed by prebuild-batch-states.
- *
- * Invariants enforced here:
- * - exactly 2 copies
- * - copy indexes are [0, 1]
- * - providerIds are distinct
- */
-export const BindingsFileSchema = z
-  .object({
-    version: z.literal(1),
-    spaceDID: z.string().min(1),
-    copies: z.array(BindingsCopySchema).length(2),
-  })
-  .superRefine((val, ctx) => {
-    const sorted = [...val.copies].sort((a, b) => a.copyIndex - b.copyIndex)
-    if (sorted[0].copyIndex !== 0 || sorted[1].copyIndex !== 1) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'copies must have copyIndex values [0, 1]',
-        path: ['copies'],
-      })
-    }
-    if (sorted[0].providerId === sorted[1].providerId) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'copies must have distinct providerId values',
-        path: ['copies'],
-      })
-    }
-  })
-
-// ---------------------------------------------------------------------------
-// Zod error formatting
-// ---------------------------------------------------------------------------
-
-/**
- * Format a ZodError into a single operator-friendly string.
- * Lists each failing field path and its message.
- *
- * @param {import('zod').ZodError} error
- * @param {string} filePath  - included in the prefix so operators know which file
- * @param {string} context   - short label like "bindings file" or "queue descriptor"
- */
-export function formatZodError(error, filePath, context) {
-  const issues = error.issues
-    .map((issue) => {
-      const fieldPath = issue.path.length > 0 ? issue.path.join('.') : '(root)'
-      return `  ${fieldPath}: ${issue.message}`
-    })
-    .join('\n')
-  return `invalid ${context}: ${filePath}\n${issues}`
-}
-
-// ---------------------------------------------------------------------------
-// Queue descriptor helpers
-// ---------------------------------------------------------------------------
-
-/**
- * @typedef {object} QueueDescriptor
- * @property {1} version
- * @property {string} batchId
- * @property {import('@storacha/filecoin-pin-migration/types').SpaceDID} spaceDID
- * @property {string} selectedRootsFile
- * @property {string} stateFile
- */
 
 /**
  * Read, parse, and validate a queue descriptor file.
@@ -246,6 +224,28 @@ export async function loadQueueDescriptor(descriptorPath, operation) {
     selectedRootsFile: result.data.selectedRootsFile,
     stateFile: result.data.stateFile,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Zod error formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format a ZodError into a single operator-friendly string.
+ * Lists each failing field path and its message.
+ *
+ * @param {import('zod').ZodError} error
+ * @param {string} filePath  - included in the prefix so operators know which file
+ * @param {string} context   - short label like "bindings file" or "queue descriptor"
+ */
+export function formatZodError(error, filePath, context) {
+  const issues = error.issues
+    .map((issue) => {
+      const fieldPath = issue.path.length > 0 ? issue.path.join('.') : '(root)'
+      return `  ${fieldPath}: ${issue.message}`
+    })
+    .join('\n')
+  return `invalid ${context}: ${filePath}\n${issues}`
 }
 
 /**

@@ -23,6 +23,7 @@ const TARGET_RPC_QUEUE_SIZE = 1000
 const RPC_SUBMISSION_BATCH_SIZE = 200
 const POLL_INTERVAL_MS = 1000
 const RPC_BOOT_TIMEOUT_MS = 15_000
+const POST_STARTUP_GRACE_MS = 1_000
 const LARGE_CAR_BYTES = 300 * 1024 * 1024
 
 /**
@@ -431,6 +432,7 @@ export async function runDownload({ dir, concurrency, port }) {
   })
   try {
     await waitForRPC(rpcPort, aria2, RPC_BOOT_TIMEOUT_MS)
+    await sleep(POST_STARTUP_GRACE_MS)
 
     /**
      * Track async notification work so the scheduler sees persisted DB state

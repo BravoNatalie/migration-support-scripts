@@ -26,7 +26,8 @@ node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency 
   Writes each CAR to `<dir>/shards/<shardCID>.car`. Resumable via shard status
   in `tracking.db`, plus aria2's session and per-file `.aria2` control files.
   `--port N` is optional; if omitted, `download` picks a free localhost port
-  for that run automatically.
+  for that run automatically. The `manifest.aria2` and `aria2.session` files are
+  just generated artifacts that can be useful for debugging if needed.
 - `prepare` *(WIP)* — compute pieceCID v2 for every shard in
   `tracking.db` where `piece_cid IS NULL`, then write `<dir>/shards/<pieceCID>.json`
   sidecars for every shard with a known pieceCID. Failures land in

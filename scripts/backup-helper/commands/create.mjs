@@ -55,6 +55,13 @@ export async function runCreate({ db, dir }) {
         `${uniqueShards.toLocaleString()} unique shards in tracking.db`,
     )
 
+    /**
+     * Write manifest.aria2 as a transitional artifact only.
+     * The RPC download flow uses tracking.db as the source of truth, not this file.
+     * Keep it for now as an operator/debug artifact, but it can be removed once
+     * nothing downstream depends on its presence anymore.
+     */
+
     const dest = manifestPath(dir)
     const tmp = `${dest}.tmp`
     const dst = shardsDir(dir)

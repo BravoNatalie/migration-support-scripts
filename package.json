@@ -12,7 +12,9 @@
     "biome:write": "biome check --write .",
     "format": "biome format --write .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "backup-helper": "node scripts/backup-helper/index.mjs",
+    "migration-repair": "node scripts/migration-repair/migration-repair.mjs"
   },
   "keywords": [],
   "author": "",
@@ -21,6 +23,7 @@
     "@filoz/synapse-core": "^0.5.2",
     "@storacha/client": "^2.1.4",
     "@storacha/filecoin-pin-migration": "^1.1.0",
+    "aria2": "^5.0.0",
     "viem": "^2.50.3",
     "zod": "^4.4.3"
   },

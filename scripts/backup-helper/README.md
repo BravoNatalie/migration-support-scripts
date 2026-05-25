@@ -11,9 +11,9 @@ The input DB is treated as strictly read-only, and all derived state lives in `t
 
 ## Subcommands
 
-```
+```sh
 node scripts/backup-helper/index.mjs create   --db <space-inventory.db> --dir <output-dir>
-node scripts/backup-helper/index.mjs download --manifest <path> [--concurrency N]
+node scripts/backup-helper/index.mjs download --dir <output-dir> [--port N] [--concurrency N]
 node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency N]
 ```
 
@@ -21,10 +21,12 @@ node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency 
   populate `<dir>/tracking.db`, and stream `<dir>/manifest.aria2`. Idempotent
   on re-run: produces byte-identical output for unchanged input and never
   clobbers a previously-computed `piece_cid` in tracking.db.
-- `download` — thin wrapper around the bundled `run-backup-download.sh` aria2
-  launcher. Reads the manifest, writes each CAR to `<dir>/shards/<shardCID>.car`.
-  Resumable via aria2's session + per-file `.aria2` control files; a second
-  invocation against the same manifest picks up where the first left off.
+- `download` — starts a local aria2 RPC worker via the bundled
+  `run-backup-download.sh` launcher, then schedules shards from `tracking.db`.
+  Writes each CAR to `<dir>/shards/<shardCID>.car`. Resumable via shard status
+  in `tracking.db`, plus aria2's session and per-file `.aria2` control files.
+  `--port N` is optional; if omitted, `download` picks a free localhost port
+  for that run automatically.
 - `prepare` *(WIP)* — compute pieceCID v2 for every shard in
   `tracking.db` where `piece_cid IS NULL`, then write `<dir>/shards/<pieceCID>.json`
   sidecars for every shard with a known pieceCID. Failures land in
@@ -41,7 +43,12 @@ node scripts/backup-helper/index.mjs create \
 
 # 2. Download CARs (long: hours for terabyte-scale inventories; resumable).
 node scripts/backup-helper/index.mjs download \
-  --manifest /path/to/backup-dir/manifest.aria2
+  --dir /path/to/backup-dir
+
+# Optional: pin aria2 RPC to a specific localhost port for debugging.
+node scripts/backup-helper/index.mjs download \
+  --dir /path/to/backup-dir \
+  --port 6801
 
 # 3. Compute pieceCIDs + write sidecars (coming soon).
 node scripts/backup-helper/index.mjs prepare \
@@ -52,31 +59,13 @@ node scripts/backup-helper/index.mjs prepare \
 
 ```text
 <dir>/
-  metadata.json           # dataset metadata
   manifest.aria2          # one entry per unique shard_cid across all spaces
-  tracking.db             # SQLite: shards (deduped inventory) + failures (added by prepare)
+  tracking.db             # SQLite: shards + download status/failures + prepare state
   aria2.session           # written by aria2 during downloads
   shards/
     <shardCID>.car        # one copy per unique shard
     <pieceCID>.json       # one sidecar per unique pieceCID (written by prepare)
 ```
-
-### `metadata.json`
-
-A short, fixed-schema identity document describing the backup itself. Written
-by `create`. Contains no per-space data; if the SP needs per-space details
-later they can query the input `space-inventory.db` directly.
-
-```json
-{
-  "source": "filecoin-pin",
-  "withIPFSIndexing": ""
-}
-```
-
-- `source` — identifies the data lineage (the migration flow that produced
-  the input inventory). Constant for this version of the tool.
-- `withIPFSIndexing` — reserved for future use; currently always an empty string.
 
 ### `shards/<pieceCID>.json`
 
@@ -126,6 +115,9 @@ inventory by `shard_cid` — that's the cheapest source of truth.
   backup". Different clients should run in different directories.
 - **Don't run two backup-helper commands against the same `<dir>` at the same
   time.** .
+- **`download` uses one local aria2 RPC daemon per run.** By default it picks a
+  free localhost port automatically; you can override it with `--port N` when
+  you need a predictable port for debugging.
 - **`download` performance is tuned for Cloudflare R2-hosted shards.** The
   launcher disables intra-file multi-threading (`--split=1`,
   `--max-connection-per-server=1`) and saturates bandwidth horizontally via

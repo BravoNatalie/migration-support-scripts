@@ -17,6 +17,9 @@ importers:
       '@storacha/filecoin-pin-migration':
         specifier: ^1.1.0
         version: 1.1.0(encoding@0.1.13)(viem@2.50.3(zod@4.4.3))
+      aria2:
+        specifier: ^5.0.0
+        version: 5.0.0
       viem:
         specifier: ^2.50.3
         version: 2.50.3(zod@4.4.3)
@@ -633,6 +636,10 @@ packages:
 
   any-signal@3.0.1:
     resolution: {integrity: sha512-xgZgJtKEa9YmDqXodIgl7Fl1C8yNXr8w6gXjqK3LW4GcEiYT+6AQfJSE/8SPsEpLLmcvbv8YU+qet94UewHxqg==}
+
+  aria2@5.0.0:
+    resolution: {integrity: sha512-jFGuo5GmvgOpQ4UnAknw9kMMFOQIPxmjKG3weQzn71lvmJXpfsFwzUsSyeih77PLTqE1+OHbgXqnZma/gW1QhA==}
+    engines: {node: '>= 22.0.0'}
 
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
@@ -1871,6 +1878,8 @@ snapshots:
       require-from-string: 2.0.2
 
   any-signal@3.0.1: {}
+
+  aria2@5.0.0: {}
 
   assertion-error@2.0.1: {}
 

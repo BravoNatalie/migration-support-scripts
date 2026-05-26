@@ -117,21 +117,36 @@ What not to do:
 
 ### `prepare`
 
-Status:
-
-- not implemented yet
-
 Expected role:
 
 - consume `tracking.db` after download
+- validate local `<dir>/shards/<shardCid>.car` file presence
 - use `piece_cid` and `root_shards`
 - write sidecar metadata under `<dir>/shards`
+
+Current behavior:
+
+- prepare starts from `download_status = 'complete'`
+- local file existence is validated in command code
+- shards route into two independent lanes:
+  - sidecar lane: `piece_cid IS NOT NULL`
+  - piece lane: `piece_cid IS NULL`
+- the piece lane computes pieceCID v2 from the local CAR file with
+  `calculateFromIterable` from `@filoz/synapse-core/piece`
+- both lanes write the same `<pieceCID>.json` sidecar payload:
+  - `shardCid`
+  - `pieceCid`
+  - `sizeBytes`
+  - `rootCids`
+- prepare failures are recorded in `failures` with `stage='prepare'`
 
 Design implication:
 
 - preserve generic failure staging (`failures.stage`)
 - keep `shards` as the canonical deduplicated entity table
 - keep future stage-specific behavior out of `create` and `download`
+- do not reintroduce network dependency into piece computation; prepare works
+  from local `.car` files only
 
 ## Persistence Model
 

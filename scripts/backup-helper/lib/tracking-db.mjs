@@ -19,7 +19,7 @@ const DOWNLOAD_STATUS = {
 
 const FAILURE_STAGE = {
   download: 'download',
-  compute: 'compute',
+  prepare: 'prepare',
 }
 
 /**
@@ -49,6 +49,13 @@ const FAILURE_STAGE = {
  * @typedef {object} UnsignedFallbackCandidate
  * @property {string} shardCid
  * @property {string} sourceUrl
+ */
+
+/**
+ * @typedef {object} PrepareCandidate
+ * @property {string} shardCid
+ * @property {string | null} pieceCid
+ * @property {number} sizeBytes
  */
 
 function now() {
@@ -157,6 +164,24 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
+  const prepareCandidatesStmt = db.prepare(`
+    SELECT
+      s.shard_cid,
+      s.piece_cid,
+      s.size_bytes
+    FROM shards AS s
+    WHERE s.download_status = 'complete'
+    ORDER BY s.shard_cid
+    LIMIT ?
+  `)
+
+  const rootCidsForShardStmt = db.prepare(`
+    SELECT rs.root_cid
+    FROM root_shards AS rs
+    WHERE rs.shard_cid = ?
+    ORDER BY rs.root_cid
+  `)
+
   const queueShardStmt = db.prepare(`
     UPDATE shards
     SET download_status = 'queued', updated_at = ?
@@ -190,6 +215,12 @@ export function openTrackingDb(dir) {
   const setEffectiveUrlStmt = db.prepare(`
     UPDATE shards
     SET effective_url = ?, updated_at = ?
+    WHERE shard_cid = ?
+  `)
+
+  const setPieceCidStmt = db.prepare(`
+    UPDATE shards
+    SET piece_cid = ?, updated_at = ?
     WHERE shard_cid = ?
   `)
 
@@ -323,6 +354,39 @@ export function openTrackingDb(dir) {
     },
 
     /**
+     * List completed shards that are eligible for prepare-time local file
+     * validation and lane routing.
+     *
+     * @param {number} limit
+     * @returns {PrepareCandidate[]}
+     */
+    listPrepareCandidates(limit) {
+      /** @type {PrepareCandidate[]} */
+      const candidates = []
+      for (const row of prepareCandidatesStmt.iterate(limit)) {
+        candidates.push({
+          shardCid: row.shard_cid.toString(),
+          pieceCid: row.piece_cid?.toString() || null,
+          sizeBytes: Number(row.size_bytes),
+        })
+      }
+      return candidates
+    },
+
+    /**
+     * @param {string} shardCid
+     * @returns {string[]}
+     */
+    listRootCidsForShard(shardCid) {
+      /** @type {string[]} */
+      const rootCids = []
+      for (const row of rootCidsForShardStmt.iterate(shardCid)) {
+        rootCids.push(row.root_cid.toString())
+      }
+      return rootCids
+    },
+
+    /**
      * @param {string} shardCid
      * @param {string} gid
      */
@@ -362,6 +426,14 @@ export function openTrackingDb(dir) {
     },
 
     /**
+     * @param {string} shardCid
+     * @param {string} pieceCid
+     */
+    setPieceCid(shardCid, pieceCid) {
+      setPieceCidStmt.run(pieceCid, now(), shardCid)
+    },
+
+    /**
      * @param {object} failure
      * @param {string} failure.shardCid
      * @param {string | null} failure.url
@@ -380,6 +452,31 @@ export function openTrackingDb(dir) {
         db.exec('ROLLBACK')
         throw err
       }
+    },
+
+    /**
+     * @param {object} failure
+     * @param {string} failure.shardCid
+     * @param {string} failure.error
+     * @param {boolean} failure.retryable
+     */
+    markPrepareFailure({ shardCid, error, retryable }) {
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        insertFailureStmt.run(FAILURE_STAGE.prepare, shardCid, null, null, error, retryable ? 1 : 0, timestamp)
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /**
+     * @param {string} shardCid
+     */
+    clearPrepareFailure(shardCid) {
+      clearFailureStmt.run(FAILURE_STAGE.prepare, shardCid)
     },
 
     getDownloadStats() {

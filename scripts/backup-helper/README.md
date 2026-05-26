@@ -5,7 +5,7 @@ This tool turns the inventory into:
 
 1. A deduplicated `aria2` manifest listing every unique shard CAR to download.
 2. Downloaded CAR files under `<dir>/shards/`.
-3. (Coming next) per-shard sidecar JSONs keyed by pieceCID v2
+3. Per-shard sidecar JSONs keyed by pieceCID v2
 
 The input DB is treated as strictly read-only, and all derived state lives in `tracking.db` under the output directory, so `rm -rf <dir>` is always a safe reset.
 
@@ -28,11 +28,11 @@ node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency 
   `--port N` is optional; if omitted, `download` picks a free localhost port
   for that run automatically. The `manifest.aria2` and `aria2.session` files are
   just generated artifacts that can be useful for debugging if needed.
-- `prepare` *(WIP)* — compute pieceCID v2 for every shard in
-  `tracking.db` where `piece_cid IS NULL`, then write `<dir>/shards/<pieceCID>.json`
-  sidecars for every shard with a known pieceCID. Failures land in
-  `tracking.db`'s `failures` table with an attempt counter; rows are deleted
-  on a later successful attempt.
+- `prepare` — process completed local shard CARs from `tracking.db`, compute
+  pieceCID v2 when `piece_cid IS NULL`, and write `<dir>/shards/<pieceCID>.json`
+  sidecars for every eligible shard. Failures land in `tracking.db`'s
+  `failures` table under `stage='prepare'`; rows are deleted on a later
+  successful attempt.
 
 ## End-to-end workflow
 
@@ -51,7 +51,7 @@ node scripts/backup-helper/index.mjs download \
   --dir /path/to/backup-dir \
   --port 6801
 
-# 3. Compute pieceCIDs + write sidecars (coming soon).
+# 3. Compute pieceCIDs + write sidecars.
 node scripts/backup-helper/index.mjs prepare \
   --dir /path/to/backup-dir
 ```
@@ -79,7 +79,6 @@ between the sidecar and the matching `<shardCID>.car` file.
   "shardCid": "bag…",
   "pieceCid": "baga…",
   "sizeBytes": 134217728,
-  "sourceUrl": "https://…r2.w3s.link/…",
   "rootCids": ["bafy…", "bafy…2"]
 }
 ```
@@ -87,8 +86,6 @@ between the sidecar and the matching `<shardCID>.car` file.
 - `shardCid` / `pieceCid` — the two identities for the shard's bytes; either
   can be used to look up the other.
 - `sizeBytes` — uncompressed byte size of the CAR file on disk.
-- `sourceUrl` — the URL the CAR was downloaded from (`MIN(source_url)` from
-  the input inventory when multiple rows reference the same shard).
 - `rootCids` — every distinct root CID that references this shard, across
   all spaces / uploads in the input inventory. Array because a single shard
   can belong to multiple uploads; most arrays will have one entry.

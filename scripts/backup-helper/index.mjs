@@ -173,7 +173,7 @@ async function prepare(argv) {
 
 const [, , sub, ...rest] = process.argv
 
-try {
+async function main() {
   switch (sub) {
     case 'create':
       await create(rest)
@@ -188,7 +188,9 @@ try {
       usage()
       process.exit(1)
   }
-} catch (err) {
+}
+
+main().catch((err) => {
   console.error(`Error: ${err?.message || err}`)
   process.exit(1)
-}
+})

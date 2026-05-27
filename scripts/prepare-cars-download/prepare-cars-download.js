@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 import { deserializeState } from '@storacha/filecoin-pin-migration'
 import { z } from 'zod'
-import { pathExists, withRunDirLock, writeFileAtomic } from '../batch-migration/utils.js'
+import { pathExists, withRunDirLock, writeFileAtomic } from '../utils.js'
 
 const ScriptArgsSchema = z.object({
   stateFile: z.string().min(1),

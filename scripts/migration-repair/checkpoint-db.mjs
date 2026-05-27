@@ -28,9 +28,7 @@ export function openCheckpointDb(path) {
   const hasPiece = db.prepare('SELECT 1 FROM pieces WHERE cid = ?')
   const lookupPiece = db.prepare('SELECT piece_cid FROM pieces WHERE cid = ?')
   const countPieces = db.prepare('SELECT COUNT(*) AS count FROM pieces')
-  const iteratePieces = db.prepare(
-    'SELECT cid, piece_cid, size_bytes, computed_at FROM pieces ORDER BY rowid',
-  )
+  const iteratePieces = db.prepare('SELECT cid, piece_cid, size_bytes, computed_at FROM pieces ORDER BY rowid')
 
   return {
     db,

@@ -24,7 +24,7 @@ manual.
 
 ## Subcommands
 
-```
+```sh
 node migration-repair.mjs scan      --input <state.json> [--out missing.json]
 node migration-repair.mjs repiece   --input <state.json> --db <checkpoint.sqlite> [--concurrency 8] [--limit N]
 node migration-repair.mjs patch     --input <state.json> --db <checkpoint.sqlite> --out <patched.json>

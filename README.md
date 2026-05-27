@@ -4,8 +4,8 @@ Helper scripts that sit alongside the storacha `space migrate` workflow.
 
 ## Scripts
 
-- [`scripts/batch-migration/`](scripts/batch-migration/) — utilities for
-  running migrations in batches.
+- [`scripts/backup-helper/`](scripts/backup-helper/) — utilities for
+  running the migration internally, from a FOC Node.
 - [`scripts/prepare-cars-download/`](scripts/prepare-cars-download/) — read a
   migration `state.json` and prepare a bulk CAR download manifest for `aria2`.
 - [`scripts/migration-repair/`](scripts/migration-repair/) — convert

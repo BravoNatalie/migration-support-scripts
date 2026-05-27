@@ -30,7 +30,8 @@ node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency 
   just generated artifacts that can be useful for debugging if needed.
 - `prepare` — process completed local shard CARs from `tracking.db`, compute
   pieceCID v2 when `piece_cid IS NULL`, and write `<dir>/shards/<pieceCID>.json`
-  sidecars for every eligible shard. Failures land in `tracking.db`'s
+  sidecars for every eligible shard. It also renames each prepared CAR from
+  `<shardCID>.car` to `<pieceCID>.car`. Failures land in `tracking.db`'s
   `failures` table under `stage='prepare'`; rows are deleted on a later
   successful attempt.
 
@@ -56,7 +57,7 @@ node scripts/backup-helper/index.mjs prepare \
   --dir /path/to/backup-dir
 ```
 
-## Output layout
+## Final Output layout
 
 ```text
 <dir>/
@@ -64,7 +65,7 @@ node scripts/backup-helper/index.mjs prepare \
   tracking.db             # SQLite: shards + download status/failures + prepare state
   aria2.session           # written by aria2 during downloads
   shards/
-    <shardCID>.car        # one copy per unique shard
+    <pieceCID>.car        # one prepared CAR per unique pieceCID
     <pieceCID>.json       # one sidecar per unique pieceCID (written by prepare)
 ```
 
@@ -72,7 +73,7 @@ node scripts/backup-helper/index.mjs prepare \
 
 One sidecar per unique pieceCID, written by `prepare`. The JSON body carries
 both the pieceCID and the shardCID so consumers can join either direction
-between the sidecar and the matching `<shardCID>.car` file.
+between the sidecar and the matching `<pieceCID>.car` file.
 
 ```json
 {

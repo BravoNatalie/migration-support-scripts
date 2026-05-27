@@ -128,11 +128,16 @@ Current behavior:
 
 - prepare starts from `download_status = 'complete'`
 - local file existence is validated in command code
+- prepare accepts either local CAR name on rerun:
+  - `<shardCid>.car` before rename
+  - `<pieceCid>.car` after rename
 - shards route into two independent lanes:
   - sidecar lane: `piece_cid IS NOT NULL`
   - piece lane: `piece_cid IS NULL`
 - the piece lane computes pieceCID v2 from the local CAR file with
   `calculateFromIterable` from `@filoz/synapse-core/piece`
+- prepare renames each eligible CAR to `<pieceCid>.car` and carries any
+  `.aria2` sidecar file along with it when present
 - both lanes write the same `<pieceCID>.json` sidecar payload:
   - `shardCid`
   - `pieceCid`

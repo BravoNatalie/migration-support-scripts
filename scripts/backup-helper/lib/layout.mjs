@@ -28,4 +28,10 @@ export const shardCarPath = (dir, shardCid) => path.join(dir, 'shards', `${shard
  * @param {string} dir
  * @param {string} pieceCid
  */
+export const pieceCarPath = (dir, pieceCid) => path.join(dir, 'shards', `${pieceCid}.car`)
+
+/**
+ * @param {string} dir
+ * @param {string} pieceCid
+ */
 export const pieceJsonPath = (dir, pieceCid) => path.join(dir, 'shards', `${pieceCid}.json`)

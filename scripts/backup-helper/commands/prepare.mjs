@@ -15,7 +15,7 @@ import { calculateFromIterable } from '@filoz/synapse-core/piece'
 import pMap from 'p-map'
 
 import { pathExists, renderProgressLine } from '../../utils.js'
-import { pieceJsonPath, shardCarPath } from '../lib/layout.mjs'
+import { pieceCarPath, pieceJsonPath, shardCarPath } from '../lib/layout.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const DEFAULT_PREPARE_CONCURRENCY = 8
@@ -38,6 +38,72 @@ async function calculateLocalPieceCid(carPath) {
     return pieceCid.toString()
   } finally {
     stream.destroy()
+  }
+}
+
+/**
+ * @param {string} carPath
+ */
+function aria2ControlPath(carPath) {
+  return `${carPath}.aria2`
+}
+
+/**
+ * Resolve the local CAR path for prepare, accepting either shard- or piece-named files.
+ *
+ * @param {string} dir
+ * @param {string} shardCid
+ * @param {string | null} pieceCid
+ */
+async function resolvePrepareCarPath(dir, shardCid, pieceCid) {
+  const shardPath = shardCarPath(dir, shardCid)
+  const hasShardPath = await pathExists(shardPath)
+
+  if (!pieceCid) {
+    return hasShardPath ? shardPath : null
+  }
+
+  const piecePath = pieceCarPath(dir, pieceCid)
+  const hasPiecePath = await pathExists(piecePath)
+
+  if (hasShardPath && hasPiecePath) {
+    throw new Error(`prepare: both shard and piece CAR files exist for ${shardCid}`)
+  }
+  if (hasPiecePath) return piecePath
+  if (hasShardPath) return shardPath
+  return null
+}
+
+/**
+ * Rename a completed shard CAR from `<shardCid>.car` to `<pieceCid>.car`, carrying any `.aria2` sidecar with it.
+ *
+ * @param {string} dir
+ * @param {string} shardCid
+ * @param {string} pieceCid
+ * @param {string} carPath
+ */
+async function renameCarToPieceCid(dir, shardCid, pieceCid, carPath) {
+  const targetPath = pieceCarPath(dir, pieceCid)
+  if (carPath === targetPath) return targetPath
+
+  if (await pathExists(targetPath)) {
+    throw new Error(`prepare: target piece CAR already exists for ${shardCid}`)
+  }
+
+  await fs.rename(carPath, targetPath)
+
+  const aria2SourceControlPath = aria2ControlPath(carPath)
+  if (!(await pathExists(aria2SourceControlPath))) return targetPath
+
+  try {
+    await fs.rename(aria2SourceControlPath, aria2ControlPath(targetPath))
+    return targetPath
+  } catch (err) {
+    try {
+      // if renaming the control file fails, roll the CAR rename back
+      await fs.rename(targetPath, carPath)
+    } catch {}
+    throw err
   }
 }
 
@@ -101,11 +167,23 @@ export async function runPrepare({ dir, concurrency }) {
     let failed = 0
 
     for (const candidate of candidates) {
-      const carPath = shardCarPath(dir, candidate.shardCid)
-      if (!(await pathExists(carPath))) {
+      let carPath
+      try {
+        carPath = await resolvePrepareCarPath(dir, candidate.shardCid, candidate.pieceCid)
+      } catch (err) {
         tracking.markPrepareFailure({
           shardCid: candidate.shardCid,
-          error: `prepare: missing shard file: ${carPath}`,
+          error: String(err?.message || err),
+          retryable: false,
+        })
+        failed++
+        continue
+      }
+
+      if (!carPath) {
+        tracking.markPrepareFailure({
+          shardCid: candidate.shardCid,
+          error: `prepare: missing shard file for ${candidate.shardCid}`,
           retryable: false,
         })
         failed++
@@ -147,6 +225,7 @@ export async function runPrepare({ dir, concurrency }) {
         sidecarLane,
         async (item) => {
           try {
+            await renameCarToPieceCid(dir, item.shardCid, item.pieceCid, item.carPath)
             const rootCids = tracking.listRootCidsForShard(item.shardCid)
             await writePieceSidecar(dir, item.shardCid, item.pieceCid, item.sizeBytes, rootCids)
             tracking.clearPrepareFailure(item.shardCid)
@@ -170,6 +249,7 @@ export async function runPrepare({ dir, concurrency }) {
           try {
             const pieceCid = await calculateLocalPieceCid(item.carPath)
             tracking.setPieceCid(item.shardCid, pieceCid)
+            await renameCarToPieceCid(dir, item.shardCid, pieceCid, item.carPath)
             const rootCids = tracking.listRootCidsForShard(item.shardCid)
             await writePieceSidecar(dir, item.shardCid, pieceCid, item.sizeBytes, rootCids)
             tracking.clearPrepareFailure(item.shardCid)

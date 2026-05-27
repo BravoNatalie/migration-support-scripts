@@ -24,6 +24,7 @@
     "@storacha/client": "^2.1.4",
     "@storacha/filecoin-pin-migration": "^1.1.0",
     "aria2": "^5.0.0",
+    "execa": "^9.6.1",
     "viem": "^2.50.3",
     "zod": "^4.4.3"
   },

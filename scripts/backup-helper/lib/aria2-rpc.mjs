@@ -137,6 +137,15 @@ export class Aria2RPC {
   }
 
   /**
+   * aria2.forceShutdown()
+   *
+   * Requests an immediate aria2 shutdown without the graceful shutdown wait.
+   */
+  forceShutdown() {
+    return this.client.call('forceShutdown')
+  }
+
+  /**
    * Attach a WebSocket notification listener such as `onDownloadComplete` or
    * `onDownloadError`.
    *

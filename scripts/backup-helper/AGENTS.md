@@ -82,7 +82,7 @@ Technical choices:
   - output file must exist
   - `.aria2` sidecar must be absent
   - file size must not be smaller than expected
-- per-file transfer policy is set in `addUri` options, not in the launcher
+- per-file transfer policy is set in `addUri` options, not in the aria2 process bootstrap
 - large files can use more `split` / `max-connection-per-server` than small ones
 
 Failure and retry model:
@@ -174,17 +174,13 @@ Important nuance:
 
 ## aria2 Integration
 
-### Launcher
-
-File:
-
-- `run-backup-download.sh`
+### aria2 Worker
 
 Purpose:
 
-- bootstrap one aria2 daemon with daemon-level settings only
+- start one aria2 daemon directly from `download.mjs` with daemon-level settings only
 
-Settings that belong in the launcher:
+Settings that belong in the aria2 worker process:
 
 - RPC enable/listen flags
 - session persistence
@@ -224,7 +220,7 @@ If behavior looks wrong during restart, inspect:
 - `tracking.db.shards.download_status`
 - local `.car` and `.car.aria2` files
 - `failures`
-- aria2 launcher logs
+- aria2 process logs
 
 ## Concurrency and Lifecycle
 
@@ -258,5 +254,4 @@ When changing code here:
 - `commands/download.mjs` — scheduler, aria2 RPC flow, retry behavior
 - `lib/tracking-db.mjs` — schema and persistence model
 - `lib/inventory-db.mjs` — read-only source iterator
-- `run-backup-download.sh` — aria2 daemon bootstrap
 - `README.md` — operator-facing behavior

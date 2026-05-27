@@ -6,17 +6,14 @@
  * resume via its session and per-file control files.
  */
 
-import { spawn } from 'node:child_process'
 import fs from 'node:fs/promises'
 import net from 'node:net'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { execa } from 'execa'
 
 import { Aria2RPC } from '../lib/aria2-rpc.mjs'
 import { shardCarPath, shardsDir } from '../lib/layout.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
-
-const LAUNCHER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'run-backup-download.sh')
 
 export const MAX_DOWNLOAD_ATTEMPTS = 3
 const TARGET_RPC_QUEUE_SIZE = 1000
@@ -24,7 +21,7 @@ const RPC_SUBMISSION_BATCH_SIZE = 200
 const POLL_INTERVAL_MS = 1000
 const RPC_BOOT_TIMEOUT_MS = 15_000
 const POST_STARTUP_GRACE_MS = 1_000
-const LARGE_CAR_BYTES = 300 * 1024 * 1024
+const DEFAULT_ARIA_CONCURRENT_FILES = 30
 
 /**
  * @typedef {[string, ...unknown[]]} Aria2RPCCall
@@ -137,11 +134,40 @@ async function probeAriaHttpRPC(port, timeoutMs) {
  * @param {number} sizeBytes
  */
 function transferOptionsForSize(sizeBytes) {
+  const SMALL_CAR_BYTES = 96 * 1024 * 1024
+  const MEDIUM_CAR_BYTES = 256 * 1024 * 1024
+  const LARGE_CAR_BYTES = 512 * 1024 * 1024
+  const XLARGE_CAR_BYTES = 1024 * 1024 * 1024
+
+  if (sizeBytes > XLARGE_CAR_BYTES) {
+    return {
+      continue: 'true',
+      split: '8',
+      'max-connection-per-server': '8',
+    }
+  }
+
   if (sizeBytes > LARGE_CAR_BYTES) {
     return {
       continue: 'true',
       split: '4',
       'max-connection-per-server': '4',
+    }
+  }
+
+  if (sizeBytes > MEDIUM_CAR_BYTES) {
+    return {
+      continue: 'true',
+      split: '3',
+      'max-connection-per-server': '3',
+    }
+  }
+
+  if (sizeBytes > SMALL_CAR_BYTES) {
+    return {
+      continue: 'true',
+      split: '2',
+      'max-connection-per-server': '2',
     }
   }
 
@@ -171,6 +197,34 @@ function getFreePort() {
       server.close((err) => (err ? reject(err) : resolve(port)))
     })
   })
+}
+
+/**
+ * @param {object} opts
+ * @param {string} opts.dir
+ * @param {number} opts.rpcPort
+ * @param {number | undefined} opts.concurrency
+ */
+function aria2Args({ dir, rpcPort, concurrency }) {
+  const maxConcurrentFiles = concurrency ?? DEFAULT_ARIA_CONCURRENT_FILES
+  const sessionFile = path.join(dir, 'aria2.session')
+
+  return [
+    '--enable-rpc=true',
+    '--rpc-listen-all=false',
+    `--rpc-listen-port=${rpcPort}`,
+    `--dir=${shardsDir(dir)}`,
+    '--allow-overwrite=false',
+    '--auto-file-renaming=false',
+    '--follow-metalink=false',
+    '--no-want-digest-header=true',
+    `--save-session=${sessionFile}`,
+    '--save-session-interval=60',
+    `--max-concurrent-downloads=${maxConcurrentFiles}`,
+    '--enable-http-pipelining=true',
+    `--stop-with-process=${process.pid}`,
+    `--console-log-level=warn`,
+  ]
 }
 
 /**
@@ -368,31 +422,32 @@ async function waitForRPC(port, aria2, timeoutMs) {
 }
 
 /**
- * @param {import('node:child_process').ChildProcess} child
- */
-function childExitPromise(child) {
-  return new Promise((resolve) => {
-    child.once('close', (code, signal) => resolve({ code, signal }))
-  })
-}
-
-/**
- * @param {import('node:child_process').ChildProcess} child
+ * @param {import('execa').Subprocess} child
  * @param {Aria2RPC} aria2
  * @param {Promise<{code: number | null, signal: NodeJS.Signals | null}>} exitPromise
+ * @param {boolean} interrupted
  */
-async function shutdownAria(child, aria2, exitPromise) {
+async function shutdownAria(child, aria2, exitPromise, interrupted) {
   try {
     await aria2.shutdown()
   } catch {}
+
+  let finalState = await Promise.race([exitPromise, sleep(3_000).then(() => null)])
+  if (finalState == null) {
+    if (interrupted) {
+      try {
+        await aria2.forceShutdown()
+      } catch {}
+      finalState = await Promise.race([exitPromise, sleep(1_000).then(() => null)])
+    }
+  }
 
   try {
     await aria2.close()
   } catch {}
 
-  const result = await Promise.race([exitPromise, sleep(5_000).then(() => null)])
-  if (result == null && !child.killed) {
-    child.kill('SIGTERM')
+  if (finalState == null && !child.killed) {
+    child.kill()
   }
 }
 
@@ -414,11 +469,13 @@ export async function runDownload({ dir, concurrency, port }) {
   const rpcPort = port ?? (await getFreePort())
   console.error(`download: starting aria2 RPC on localhost:${rpcPort}`)
 
-  const args = [LAUNCHER_PATH, dir, String(rpcPort)]
-  if (concurrency != null) args.push(String(concurrency))
-
-  const child = spawn('bash', args, { stdio: 'inherit' })
-  const exitPromise = childExitPromise(child)
+  const child = execa('aria2c', aria2Args({ dir, rpcPort, concurrency }), {
+    stdio: 'inherit',
+  })
+  const exitPromise = child.then(
+    (result) => ({ code: result.exitCode, signal: result.signal ?? null }),
+    (error) => ({ code: error.exitCode ?? null, signal: error.signal ?? null }),
+  )
 
   const aria2 = new Aria2RPC({ port: rpcPort })
   /** @type {Map<string, string>} */
@@ -427,11 +484,34 @@ export async function runDownload({ dir, concurrency, port }) {
   const shardContext = new Map()
   /** @type {Set<Promise<void>>} */
   const notificationTasks = new Set()
-  child.once('error', (err) => {
-    console.error(`download: failed to launch aria2: ${err.message}`)
-  })
+  let interrupted = false
+  let signalMessageShown = false
+
+  /**
+   * @param {NodeJS.Signals} signal
+   */
+  const onInterruptSignal = (signal) => {
+    interrupted = true
+    if (!signalMessageShown) {
+      signalMessageShown = true
+      console.error(`\ndownload: ${signal} received, shutting down aria2...`)
+    }
+  }
+
+  process.on('SIGINT', onInterruptSignal)
+  process.on('SIGTERM', onInterruptSignal)
   try {
-    await waitForRPC(rpcPort, aria2, RPC_BOOT_TIMEOUT_MS)
+    const startupExit = await Promise.race([
+      waitForRPC(rpcPort, aria2, RPC_BOOT_TIMEOUT_MS).then(() => null),
+      exitPromise,
+    ])
+    if (startupExit) {
+      const reason =
+        startupExit.signal != null
+          ? `terminated by signal ${startupExit.signal}`
+          : `exited with code ${startupExit.code ?? 1}`
+      throw new Error(`download: aria2 ${reason}`)
+    }
     await sleep(POST_STARTUP_GRACE_MS)
 
     /**
@@ -612,33 +692,48 @@ export async function runDownload({ dir, concurrency, port }) {
     }
 
     while (true) {
-      // has the aria2 launcher process already exited unexpectedly?
-      const launcherState = await Promise.race([exitPromise, sleep(0).then(() => null)])
-      if (launcherState && launcherState.code !== 0) {
-        throw new Error(`download: aria2 exited with code ${launcherState.code ?? 1}`)
+      if (interrupted) {
+        break
       }
-      if (launcherState && launcherState.signal != null) {
-        throw new Error(`download: aria2 terminated by signal ${launcherState.signal}`)
+
+      // has the aria2 worker process already exited unexpectedly?
+      const workerState = await Promise.race([exitPromise, sleep(0).then(() => null)])
+      if (workerState && workerState.code !== 0) {
+        throw new Error(`download: aria2 exited with code ${workerState.code ?? 1}`)
+      }
+      if (workerState && workerState.signal != null) {
+        throw new Error(`download: aria2 terminated by signal ${workerState.signal}`)
       }
 
       await reconcileUnsignedFallbacks()
+      if (interrupted) {
+        break
+      }
       await fillQueue()
       await waitForNotificationTasks()
+      if (interrupted) {
+        break
+      }
 
       const stats = tracking.getDownloadStats()
       console.error(
-        `download: complete=${stats.complete.toLocaleString()} pending=${stats.pending.toLocaleString()} queued=${stats.queued.toLocaleString()} active=${stats.active.toLocaleString()} error=${stats.error.toLocaleString()}`,
+        `\ndownload: complete=${stats.complete.toString()} pending=${stats.pending.toString()} queued=${stats.queued.toString()} active=${stats.active.toString()} error=${stats.error.toString()}`,
       )
 
       if (stats.pending === 0 && stats.queued === 0 && stats.active === 0) {
         break
       }
 
+      if (interrupted) {
+        break
+      }
       await sleep(POLL_INTERVAL_MS)
     }
   } finally {
     try {
-      await shutdownAria(child, aria2, exitPromise)
+      process.off('SIGINT', onInterruptSignal)
+      process.off('SIGTERM', onInterruptSignal)
+      await shutdownAria(child, aria2, exitPromise, interrupted)
     } finally {
       tracking.close()
     }

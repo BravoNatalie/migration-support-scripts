@@ -21,8 +21,8 @@ node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency 
   populate `<dir>/tracking.db`, and stream `<dir>/manifest.aria2`. Idempotent
   on re-run: produces byte-identical output for unchanged input and never
   clobbers a previously-computed `piece_cid` in tracking.db.
-- `download` — starts a local aria2 RPC worker via the bundled
-  `run-backup-download.sh` launcher, then schedules shards from `tracking.db`.
+- `download` — starts a local aria2 RPC worker directly from the command,
+  then schedules shards from `tracking.db`.
   Writes each CAR to `<dir>/shards/<shardCID>.car`. Resumable via shard status
   in `tracking.db`, plus aria2's session and per-file `.aria2` control files.
   `--port N` is optional; if omitted, `download` picks a free localhost port
@@ -120,6 +120,6 @@ inventory by `shard_cid` — that's the cheapest source of truth.
   free localhost port automatically; you can override it with `--port N` when
   you need a predictable port for debugging.
 - **`download` performance is tuned for Cloudflare R2-hosted shards.** The
-  launcher disables intra-file multi-threading (`--split=1`,
+  aria2 worker disables intra-file multi-threading (`--split=1`,
   `--max-connection-per-server=1`) and saturates bandwidth horizontally via
   `--max-concurrent-downloads`. Tune via `--concurrency N`; default is 16.

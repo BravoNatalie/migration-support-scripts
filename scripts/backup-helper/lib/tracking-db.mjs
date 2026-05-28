@@ -55,7 +55,6 @@ const FAILURE_STAGE = {
  * @typedef {object} PrepareCandidate
  * @property {string} shardCid
  * @property {string | null} pieceCid
- * @property {number} sizeBytes
  */
 
 function now() {
@@ -84,6 +83,9 @@ export function openTrackingDb(dir) {
 
     CREATE INDEX IF NOT EXISTS idx_shards_pending
       ON shards(piece_cid) WHERE piece_cid IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_shards_piece_cid
+      ON shards(piece_cid);
 
     CREATE INDEX IF NOT EXISTS idx_shards_download_status
       ON shards(download_status, shard_cid);
@@ -167,19 +169,12 @@ export function openTrackingDb(dir) {
   const prepareCandidatesStmt = db.prepare(`
     SELECT
       s.shard_cid,
-      s.piece_cid,
-      s.size_bytes
+      s.piece_cid
     FROM shards AS s
     WHERE s.download_status = 'complete'
+      AND s.shard_cid > ?
     ORDER BY s.shard_cid
     LIMIT ?
-  `)
-
-  const rootCidsForShardStmt = db.prepare(`
-    SELECT rs.root_cid
-    FROM root_shards AS rs
-    WHERE rs.shard_cid = ?
-    ORDER BY rs.root_cid
   `)
 
   const queueShardStmt = db.prepare(`
@@ -354,36 +349,22 @@ export function openTrackingDb(dir) {
     },
 
     /**
-     * List completed shards that are eligible for prepare-time local file
-     * validation and lane routing.
+     * List one stable keyset-paginated batch of completed shards for prepare.
      *
      * @param {number} limit
+     * @param {string} afterShardCid
      * @returns {PrepareCandidate[]}
      */
-    listPrepareCandidates(limit) {
+    listPrepareCandidates(limit, afterShardCid) {
       /** @type {PrepareCandidate[]} */
       const candidates = []
-      for (const row of prepareCandidatesStmt.iterate(limit)) {
+      for (const row of prepareCandidatesStmt.iterate(afterShardCid, limit)) {
         candidates.push({
           shardCid: row.shard_cid.toString(),
           pieceCid: row.piece_cid?.toString() || null,
-          sizeBytes: Number(row.size_bytes),
         })
       }
       return candidates
-    },
-
-    /**
-     * @param {string} shardCid
-     * @returns {string[]}
-     */
-    listRootCidsForShard(shardCid) {
-      /** @type {string[]} */
-      const rootCids = []
-      for (const row of rootCidsForShardStmt.iterate(shardCid)) {
-        rootCids.push(row.root_cid.toString())
-      }
-      return rootCids
     },
 
     /**

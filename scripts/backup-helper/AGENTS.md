@@ -121,8 +121,8 @@ Expected role:
 
 - consume `tracking.db` after download
 - validate local `<dir>/shards/<shardCid>.car` file presence
-- use `piece_cid` and `root_shards`
-- write sidecar metadata under `<dir>/shards`
+- use `piece_cid`
+- rename completed local CARs to `<pieceCid>.car`
 
 Current behavior:
 
@@ -131,18 +131,10 @@ Current behavior:
 - prepare accepts either local CAR name on rerun:
   - `<shardCid>.car` before rename
   - `<pieceCid>.car` after rename
-- shards route into two independent lanes:
-  - sidecar lane: `piece_cid IS NOT NULL`
-  - piece lane: `piece_cid IS NULL`
-- the piece lane computes pieceCID v2 from the local CAR file with
+- prepare computes pieceCID v2 only when `piece_cid IS NULL`, using
   `calculateFromIterable` from `@filoz/synapse-core/piece`
 - prepare renames each eligible CAR to `<pieceCid>.car` and carries any
   `.aria2` sidecar file along with it when present
-- both lanes write the same `<pieceCID>.json` sidecar payload:
-  - `shardCid`
-  - `pieceCid`
-  - `sizeBytes`
-  - `rootCids`
 - prepare failures are recorded in `failures` with `stage='prepare'`
 
 Design implication:

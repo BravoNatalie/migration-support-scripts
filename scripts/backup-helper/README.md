@@ -14,6 +14,7 @@ The input DB is treated as strictly read-only, and all derived state lives in `t
 node scripts/backup-helper/index.mjs create   --db <space-inventory.db> --dir <output-dir>
 node scripts/backup-helper/index.mjs download --dir <output-dir> [--port N] [--concurrency N]
 node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency N]
+node scripts/backup-helper/index.mjs commit   --dir <output-dir> --target <curio-piece-dir> --provider-id N --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
 ```
 
 - `create` — read the input DB, deduplicate by `shard_cid` across every space,
@@ -32,6 +33,12 @@ node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency 
   `<shardCID>.car` to `<pieceCID>.car`. Failures land in `tracking.db`'s
   `failures` table under `stage='prepare'`; rows are deleted on a later
   successful attempt.
+- `commit` — uses `tracking.db` plus Synapse to park prepared pieces and commit
+  them on-chain. The parking flow shells out to
+  `curio toolbox import-pieces --source <dir> --target <target> --batch-size N`
+  and consumes its JSON `{ count, pieces }` output until `count = 0`. Commit
+  state is persisted on `root_shards` plus a single `migration_metadata` row in
+  `tracking.db`.
 
 ## End-to-end workflow
 
@@ -53,6 +60,14 @@ node scripts/backup-helper/index.mjs download \
 # 3. Compute pieceCIDs + rename CARs to pieceCID filenames.
 node scripts/backup-helper/index.mjs prepare \
   --dir /path/to/backup-dir
+
+# 4. Park prepared pieces and commit them on-chain.
+node scripts/backup-helper/index.mjs commit \
+  --dir /path/to/backup-dir \
+  --target /path/to/curio-storage/piece \
+  --provider-id 123 \
+  --session-key 0x... \
+  --customer-wallet 0x...
 ```
 
 ## Final Output layout
@@ -60,7 +75,7 @@ node scripts/backup-helper/index.mjs prepare \
 ```text
 <dir>/
   manifest.aria2          # one entry per unique shard_cid across all spaces
-  tracking.db             # SQLite: shards + download status/failures + prepare state
+  tracking.db             # SQLite: shards + root_shards + download/prepare/commit state
   aria2.session           # written by aria2 during downloads
   shards/
     <pieceCID>.car        # one prepared CAR per unique pieceCID
@@ -89,6 +104,7 @@ node scripts/backup-helper/index.mjs prepare \
   free localhost port automatically; you can override it with `--port N` when
   you need a predictable port for debugging.
 - **`download` performance is tuned for Cloudflare R2-hosted shards.** The
-  aria2 worker disables intra-file multi-threading (`--split=1`,
-  `--max-connection-per-server=1`) and saturates bandwidth horizontally via
-  `--max-concurrent-downloads`. Tune via `--concurrency N`; default is 16.
+  aria2 worker saturates bandwidth horizontally via
+  `--max-concurrent-downloads` and uses size-based per-file `split` /
+  `max-connection-per-server` settings. Tune via `--concurrency N`; current
+  default is 50.

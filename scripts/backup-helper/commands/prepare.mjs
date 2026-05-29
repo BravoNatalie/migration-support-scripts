@@ -174,6 +174,8 @@ export async function runPrepare({ dir, concurrency }) {
               pieceCid = await calculateLocalPieceCid(workItem.carPath)
               tracking.setPieceCid(workItem.shardCid, pieceCid)
               computedPieceCid = true
+            } else {
+              tracking.setRootShardsPieceCid(workItem.shardCid, pieceCid)
             }
 
             await renameCarToPieceCid(dir, workItem.shardCid, pieceCid, workItem.carPath)

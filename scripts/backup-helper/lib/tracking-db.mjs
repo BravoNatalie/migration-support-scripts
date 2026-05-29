@@ -62,6 +62,19 @@ function now() {
 }
 
 /**
+ * @param {DatabaseSync} db
+ * @param {string} tableName
+ * @param {string} columnName
+ */
+function hasColumn(db, tableName, columnName) {
+  const pragma = db.prepare(`PRAGMA table_info(${tableName})`)
+  for (const row of pragma.iterate()) {
+    if (row.name?.toString() === columnName) return true
+  }
+  return false
+}
+
+/**
  * @param {string} dir  Absolute path to the output directory
  */
 export function openTrackingDb(dir) {
@@ -111,6 +124,15 @@ export function openTrackingDb(dir) {
 
     CREATE INDEX IF NOT EXISTS idx_failures_shard
       ON failures(shard_cid);
+  `)
+
+  if (!hasColumn(db, 'root_shards', 'piece_cid')) {
+    db.exec('ALTER TABLE root_shards ADD COLUMN piece_cid TEXT')
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_root_shards_shard_cid
+      ON root_shards(shard_cid);
   `)
 
   const upsert = db.prepare(`
@@ -215,6 +237,12 @@ export function openTrackingDb(dir) {
 
   const setPieceCidStmt = db.prepare(`
     UPDATE shards
+    SET piece_cid = ?, updated_at = ?
+    WHERE shard_cid = ?
+  `)
+
+  const setRootShardsPieceCidStmt = db.prepare(`
+    UPDATE root_shards
     SET piece_cid = ?, updated_at = ?
     WHERE shard_cid = ?
   `)
@@ -411,7 +439,24 @@ export function openTrackingDb(dir) {
      * @param {string} pieceCid
      */
     setPieceCid(shardCid, pieceCid) {
-      setPieceCidStmt.run(pieceCid, now(), shardCid)
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        setPieceCidStmt.run(pieceCid, timestamp, shardCid)
+        setRootShardsPieceCidStmt.run(pieceCid, timestamp, shardCid)
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /**
+     * @param {string} shardCid
+     * @param {string} pieceCid
+     */
+    setRootShardsPieceCid(shardCid, pieceCid) {
+      setRootShardsPieceCidStmt.run(pieceCid, now(), shardCid)
     },
 
     /**

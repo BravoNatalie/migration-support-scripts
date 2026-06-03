@@ -10,10 +10,12 @@ import { fromSecp256k1 } from '@filoz/synapse-core/session-key'
 import { addPieces, createDataSet, waitForAddPieces, waitForCreateDataSet } from '@filoz/synapse-core/sp'
 import { getDataSet } from '@filoz/synapse-core/warm-storage'
 import { execa } from 'execa'
+import { createPublicClient, http } from 'viem'
 import { getAddress } from 'viem/utils'
 import { z } from 'zod'
 
 import { renderProgressLine } from '../../utils.js'
+import { shardsDir } from '../lib/layout.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const PARKING_BATCH_SIZE = 50
@@ -26,6 +28,12 @@ const EMPTY_POLL_INTERVAL_MS = 1_000
  * @property {string} rootCid
  * @property {string} shardCid
  * @property {string} pieceCid
+ */
+
+/**
+ * @typedef {object} EnsuredDataSet
+ * @property {number} dataSetId
+ * @property {bigint} clientDataSetId
  */
 
 /** @typedef {ReturnType<typeof openTrackingDb>} TrackingDb */
@@ -58,25 +66,28 @@ async function createSessionKey(sessionKeyStr, customerWallet, chain) {
  * @param {ReturnType<typeof fromSecp256k1>} args.sessionKey
  * @param {string} args.serviceUrl
  * @param {`0x${string}`} args.providerAddress
+ * @param {import('viem').PublicClient} args.publicClient
+ * @returns {Promise<EnsuredDataSet>}
  */
-async function ensureDataSet({ tracking, sessionKey, serviceUrl, providerAddress }) {
+async function ensureDataSet({ tracking, sessionKey, serviceUrl, providerAddress, publicClient }) {
   const metadata = tracking.getMigrationMetadata()
   if (!metadata) {
     throw new Error('commit: migration metadata was not initialized')
   }
 
   if (metadata.dataSetId != null) {
+    console.log(`Dataset ${metadata.dataSetId} already exists, skipping creation...`)
     if (metadata.clientDataSetId == null) {
-      const dataSetInfo = await getDataSet(sessionKey.client, {
+      const dataSetInfo = await getDataSet(publicClient, {
         dataSetId: BigInt(metadata.dataSetId),
       })
       if (!dataSetInfo) {
         throw new Error(`commit: dataset ${metadata.dataSetId} was not found on-chain`)
       }
-      tracking.setMigrationClientDataSetId(Number(dataSetInfo.clientDataSetId))
+      tracking.setMigrationClientDataSetId(dataSetInfo.clientDataSetId)
       return {
         dataSetId: metadata.dataSetId,
-        clientDataSetId: Number(dataSetInfo.clientDataSetId),
+        clientDataSetId: dataSetInfo.clientDataSetId,
       }
     }
 
@@ -90,6 +101,11 @@ async function ensureDataSet({ tracking, sessionKey, serviceUrl, providerAddress
     }
   }
 
+  console.log(`Creating dataset...
+    payee=${providerAddress} 
+    payer=${metadata.clientWallet} 
+    serviceURL=${serviceUrl}
+  `)
   const createResult = await createDataSet(sessionKey.client, {
     cdn: true,
     payee: providerAddress,
@@ -100,20 +116,30 @@ async function ensureDataSet({ tracking, sessionKey, serviceUrl, providerAddress
       withIPFSIndexing: '',
     },
   })
+
+  console.log(`Waiting for dataset to be created...
+    txHash=${createResult.txHash}
+    statusUrl=${createResult.statusUrl}
+  `)
+
   const { dataSetId } = await waitForCreateDataSet(createResult)
-  const dataSetInfo = await getDataSet(sessionKey.client, { dataSetId })
+  console.log(`Dataset created: id=${dataSetId.toString()}`)
+
+  const dataSetInfo = await getDataSet(publicClient, { dataSetId })
   if (!dataSetInfo) {
     throw new Error(`commit: dataset ${dataSetId} was created but could not be fetched`)
   }
 
+  console.log(`Saving dataset info: dataSetId=${dataSetId.toString()} clientDataSetId=${dataSetInfo.clientDataSetId}`)
+
   tracking.markMigrationDataSetCreated({
     dataSetId: Number(dataSetId),
-    clientDataSetId: Number(dataSetInfo.clientDataSetId),
+    clientDataSetId: dataSetInfo.clientDataSetId,
   })
 
   return {
     dataSetId: Number(dataSetId),
-    clientDataSetId: Number(dataSetInfo.clientDataSetId),
+    clientDataSetId: dataSetInfo.clientDataSetId,
   }
 }
 
@@ -148,7 +174,7 @@ async function runParkingBinary(dir, target) {
     'toolbox',
     'import-pieces',
     '--source',
-    dir,
+    shardsDir(dir),
     '--target',
     target,
     '--batch-size',
@@ -180,7 +206,7 @@ function buildCommitPieces(rows) {
  * @param {ReturnType<typeof fromSecp256k1>} args.sessionKey
  * @param {string} args.serviceUrl
  * @param {number} args.dataSetId
- * @param {number} args.clientDataSetId
+ * @param {bigint} args.clientDataSetId
  * @param {TrackingDb} args.tracking
  * @param {CommitRow[]} args.rows
  */
@@ -189,7 +215,7 @@ async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId,
     const addResult = await addPieces(sessionKey.client, {
       serviceURL: serviceUrl,
       dataSetId: BigInt(dataSetId),
-      clientDataSetId: BigInt(clientDataSetId),
+      clientDataSetId,
       pieces: buildCommitPieces(rows),
     })
     const addStatus = await waitForAddPieces({ statusUrl: addResult.statusUrl })
@@ -241,12 +267,16 @@ export async function runCommit({
       tracking.resetCommitRowsForRetry()
     }
 
+    console.log(`crate session key...`)
     const session = await createSessionKey(/** @type {`0x${string}`} */ (sessionKey), customerWallet, chain)
+    const publicClient = createPublicClient({ chain, transport: http() })
+
     const ensuredDataSet = await ensureDataSet({
       tracking,
       sessionKey: session,
       serviceUrl,
       providerAddress,
+      publicClient,
     })
 
     const parkingLane = (async () => {

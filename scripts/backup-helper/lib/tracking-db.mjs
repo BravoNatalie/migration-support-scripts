@@ -86,7 +86,7 @@ const MIGRATION_STATE = {
  * @property {string} serviceUrl
  * @property {string} providerAddress
  * @property {number | null} dataSetId
- * @property {number | null} clientDataSetId
+ * @property {bigint | null} clientDataSetId
  * @property {string} state
  * @property {number} updatedAt
  */
@@ -723,7 +723,7 @@ export function openTrackingDb(dir) {
         serviceUrl: row.service_url.toString(),
         providerAddress: row.provider_address.toString(),
         dataSetId: row.data_set_id != null ? Number(row.data_set_id) : null,
-        clientDataSetId: row.client_data_set_id != null ? Number(row.client_data_set_id) : null,
+        clientDataSetId: row.client_data_set_id != null ? BigInt(row.client_data_set_id.toString()) : null,
         state: row.state.toString(),
         updatedAt: Number(row.updated_at),
       }
@@ -737,19 +737,19 @@ export function openTrackingDb(dir) {
     },
 
     /**
-     * @param {number} clientDataSetId
+     * @param {bigint} clientDataSetId
      */
     setMigrationClientDataSetId(clientDataSetId) {
-      updateMigrationClientDataSetIdStmt.run(clientDataSetId, now())
+      updateMigrationClientDataSetIdStmt.run(clientDataSetId.toString(), now())
     },
 
     /**
      * @param {object} metadata
      * @param {number} metadata.dataSetId
-     * @param {number} metadata.clientDataSetId
+     * @param {bigint} metadata.clientDataSetId
      */
     markMigrationDataSetCreated({ dataSetId, clientDataSetId }) {
-      updateMigrationMetadataStmt.run(dataSetId, clientDataSetId, MIGRATION_STATE.migrating, now())
+      updateMigrationMetadataStmt.run(dataSetId, clientDataSetId.toString(), MIGRATION_STATE.migrating, now())
     },
 
     resetCommitRowsForRetry() {

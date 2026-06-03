@@ -117,21 +117,33 @@ What not to do:
 
 ### `prepare`
 
-Status:
-
-- not implemented yet
-
 Expected role:
 
 - consume `tracking.db` after download
-- use `piece_cid` and `root_shards`
-- write sidecar metadata under `<dir>/shards`
+- validate local `<dir>/shards/<shardCid>.car` file presence
+- use `piece_cid`
+- rename completed local CARs to `<pieceCid>.car`
+
+Current behavior:
+
+- prepare starts from `download_status = 'complete'`
+- local file existence is validated in command code
+- prepare accepts either local CAR name on rerun:
+  - `<shardCid>.car` before rename
+  - `<pieceCid>.car` after rename
+- prepare computes pieceCID v2 only when `piece_cid IS NULL`, using
+  `calculateFromIterable` from `@filoz/synapse-core/piece`
+- prepare renames each eligible CAR to `<pieceCid>.car` and carries any
+  `.aria2` sidecar file along with it when present
+- prepare failures are recorded in `failures` with `stage='prepare'`
 
 Design implication:
 
 - preserve generic failure staging (`failures.stage`)
 - keep `shards` as the canonical deduplicated entity table
 - keep future stage-specific behavior out of `create` and `download`
+- do not reintroduce network dependency into piece computation; prepare works
+  from local `.car` files only
 
 ## Persistence Model
 

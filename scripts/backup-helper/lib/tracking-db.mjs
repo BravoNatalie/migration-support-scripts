@@ -19,7 +19,7 @@ const DOWNLOAD_STATUS = {
 
 const FAILURE_STAGE = {
   download: 'download',
-  compute: 'compute',
+  prepare: 'prepare',
 }
 
 /**
@@ -51,8 +51,27 @@ const FAILURE_STAGE = {
  * @property {string} sourceUrl
  */
 
+/**
+ * @typedef {object} PrepareCandidate
+ * @property {string} shardCid
+ * @property {string | null} pieceCid
+ */
+
 function now() {
   return Date.now()
+}
+
+/**
+ * @param {DatabaseSync} db
+ * @param {string} tableName
+ * @param {string} columnName
+ */
+function hasColumn(db, tableName, columnName) {
+  const pragma = db.prepare(`PRAGMA table_info(${tableName})`)
+  for (const row of pragma.iterate()) {
+    if (row.name?.toString() === columnName) return true
+  }
+  return false
 }
 
 /**
@@ -78,6 +97,9 @@ export function openTrackingDb(dir) {
     CREATE INDEX IF NOT EXISTS idx_shards_pending
       ON shards(piece_cid) WHERE piece_cid IS NULL;
 
+    CREATE INDEX IF NOT EXISTS idx_shards_piece_cid
+      ON shards(piece_cid);
+
     CREATE INDEX IF NOT EXISTS idx_shards_download_status
       ON shards(download_status, shard_cid);
 
@@ -102,6 +124,15 @@ export function openTrackingDb(dir) {
 
     CREATE INDEX IF NOT EXISTS idx_failures_shard
       ON failures(shard_cid);
+  `)
+
+  if (!hasColumn(db, 'root_shards', 'piece_cid')) {
+    db.exec('ALTER TABLE root_shards ADD COLUMN piece_cid TEXT')
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_root_shards_shard_cid
+      ON root_shards(shard_cid);
   `)
 
   const upsert = db.prepare(`
@@ -157,6 +188,17 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
+  const prepareCandidatesStmt = db.prepare(`
+    SELECT
+      s.shard_cid,
+      s.piece_cid
+    FROM shards AS s
+    WHERE s.download_status = 'complete'
+      AND s.shard_cid > ?
+    ORDER BY s.shard_cid
+    LIMIT ?
+  `)
+
   const queueShardStmt = db.prepare(`
     UPDATE shards
     SET download_status = 'queued', updated_at = ?
@@ -190,6 +232,18 @@ export function openTrackingDb(dir) {
   const setEffectiveUrlStmt = db.prepare(`
     UPDATE shards
     SET effective_url = ?, updated_at = ?
+    WHERE shard_cid = ?
+  `)
+
+  const setPieceCidStmt = db.prepare(`
+    UPDATE shards
+    SET piece_cid = ?, updated_at = ?
+    WHERE shard_cid = ?
+  `)
+
+  const setRootShardsPieceCidStmt = db.prepare(`
+    UPDATE root_shards
+    SET piece_cid = ?, updated_at = ?
     WHERE shard_cid = ?
   `)
 
@@ -323,6 +377,25 @@ export function openTrackingDb(dir) {
     },
 
     /**
+     * List one stable keyset-paginated batch of completed shards for prepare.
+     *
+     * @param {number} limit
+     * @param {string} afterShardCid
+     * @returns {PrepareCandidate[]}
+     */
+    listPrepareCandidates(limit, afterShardCid) {
+      /** @type {PrepareCandidate[]} */
+      const candidates = []
+      for (const row of prepareCandidatesStmt.iterate(afterShardCid, limit)) {
+        candidates.push({
+          shardCid: row.shard_cid.toString(),
+          pieceCid: row.piece_cid?.toString() || null,
+        })
+      }
+      return candidates
+    },
+
+    /**
      * @param {string} shardCid
      * @param {string} gid
      */
@@ -362,6 +435,31 @@ export function openTrackingDb(dir) {
     },
 
     /**
+     * @param {string} shardCid
+     * @param {string} pieceCid
+     */
+    setPieceCid(shardCid, pieceCid) {
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        setPieceCidStmt.run(pieceCid, timestamp, shardCid)
+        setRootShardsPieceCidStmt.run(pieceCid, timestamp, shardCid)
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /**
+     * @param {string} shardCid
+     * @param {string} pieceCid
+     */
+    setRootShardsPieceCid(shardCid, pieceCid) {
+      setRootShardsPieceCidStmt.run(pieceCid, now(), shardCid)
+    },
+
+    /**
      * @param {object} failure
      * @param {string} failure.shardCid
      * @param {string | null} failure.url
@@ -380,6 +478,31 @@ export function openTrackingDb(dir) {
         db.exec('ROLLBACK')
         throw err
       }
+    },
+
+    /**
+     * @param {object} failure
+     * @param {string} failure.shardCid
+     * @param {string} failure.error
+     * @param {boolean} failure.retryable
+     */
+    markPrepareFailure({ shardCid, error, retryable }) {
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        insertFailureStmt.run(FAILURE_STAGE.prepare, shardCid, null, null, error, retryable ? 1 : 0, timestamp)
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /**
+     * @param {string} shardCid
+     */
+    clearPrepareFailure(shardCid) {
+      clearFailureStmt.run(FAILURE_STAGE.prepare, shardCid)
     },
 
     getDownloadStats() {

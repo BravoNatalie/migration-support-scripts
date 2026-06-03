@@ -8,7 +8,7 @@
  *   download  --dir <output-dir> [--concurrency N] [--port N]
  *             Run aria2 via RPC; CARs land in <dir>/shards/. If omitted, --port
  *             defaults to a free localhost port chosen at runtime.
- *   prepare   --dir <output-dir> [--concurrency N]      [not yet implemented]
+ *   prepare   --dir <output-dir> [--concurrency N]
  */
 
 import fs from 'node:fs'
@@ -17,6 +17,7 @@ import { parseArgs } from 'node:util'
 
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
+import { runPrepare } from './commands/prepare.mjs'
 
 function usage() {
   console.error(`Usage:
@@ -63,6 +64,22 @@ function requireDb(db, command) {
   return resolved
 }
 
+/**
+ * @param {string | undefined} value
+ * @param {string} command
+ */
+function parseConcurrency(value, command) {
+  if (value == null) return
+
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < 1) {
+    console.error(`Error: ${command}: --concurrency must be a positive integer (got ${value})`)
+    process.exit(1)
+  }
+
+  return n
+}
+
 async function create(argv) {
   let values
   try {
@@ -107,15 +124,7 @@ async function download(argv) {
     process.exit(1)
   }
 
-  let concurrency
-  if (values.concurrency != null) {
-    const n = Number(values.concurrency)
-    if (!Number.isInteger(n) || n < 1) {
-      console.error(`Error: download: --concurrency must be a positive integer (got ${values.concurrency})`)
-      process.exit(1)
-    }
-    concurrency = n
-  }
+  const concurrency = parseConcurrency(values.concurrency, 'download')
 
   let port
   if (values.port != null) {
@@ -134,6 +143,34 @@ async function download(argv) {
   })
 }
 
+/**
+ * @param {string[]} argv
+ */
+async function prepare(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        dir: { type: 'string' },
+        concurrency: { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  const concurrency = parseConcurrency(values.concurrency, 'prepare')
+
+  await runPrepare({
+    dir: requireDir(values.dir, 'prepare'),
+    concurrency,
+  })
+}
+
 const [, , sub, ...rest] = process.argv
 
 async function main() {
@@ -145,7 +182,7 @@ async function main() {
       await download(rest)
       break
     case 'prepare':
-      console.error('prepare: not yet implemented')
+      await prepare(rest)
       break
     default:
       usage()

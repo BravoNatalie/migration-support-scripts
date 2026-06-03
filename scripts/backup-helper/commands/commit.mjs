@@ -158,7 +158,10 @@ function renderCommitProgress(summary) {
 const parkingResultSchema = z
   .object({
     count: z.number().int().nonnegative(),
-    pieces: z.array(z.string()),
+    pieces: z
+      .array(z.string())
+      .nullable()
+      .transform((pieces) => pieces ?? []),
   })
   .refine((value) => value.count === value.pieces.length, {
     message: 'count must match pieces length',
@@ -193,7 +196,7 @@ async function runParkingBinary(dir, target) {
     throw new Error(`commit: parking command returned invalid JSON: ${err?.message || err}`)
   }
 
-  return parkingResultSchema.parse(parsed)
+  return /** @type {ParkingResult} */ (parkingResultSchema.parse(parsed))
 }
 
 /**

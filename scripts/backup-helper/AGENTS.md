@@ -145,6 +145,47 @@ Design implication:
 - do not reintroduce network dependency into piece computation; prepare works
   from local `.car` files only
 
+### `commit`
+
+Entry point:
+
+- `commands/commit.mjs`
+
+Purpose:
+
+- park prepared pieces so the target provider can use them
+- commit each `(piece_cid, root_cid)` pair on-chain with piece metadata
+- persist migration-level state in `tracking.db`
+
+Current behavior:
+
+- commit requires:
+  - `--dir`
+  - `--target`
+  - `--service-url`
+  - `--provider-address`
+  - `--session-key`
+  - `--customer-wallet`
+- parking shells out to:
+  - `curio toolbox import-pieces --source <dir> --target <target> --batch-size N`
+- the command consumes JSON output shaped like:
+  - `{ count, pieces }`
+- parking marks matching `root_shards` rows from `pending` to `parked`
+- commit claims flat root-level batches ordered by `(piece_cid, root_cid)`
+- the dataset is created first with no pieces and persisted before parking/commit lanes start
+- later `addPieces` batches can run concurrently
+- `--retry` revives `failed` and `committing` rows back to `parked`
+
+Important design choices:
+
+- `root_shards` is the commit work table
+- `shards.piece_cid` stays canonical at shard level
+- `root_shards.piece_cid` is a propagated copy for commit-phase querying
+- commit metadata per row is:
+  - `{ ipfsRootCID: rootCid }`
+- commit state is stored on `root_shards`, not in `failures`
+- migration-level identity and dataset state live in `migration_metadata`
+
 ## Persistence Model
 
 ### `tracking.db`
@@ -159,16 +200,27 @@ Main tables:
 - `root_shards`
   - preserves many-to-many `root_cid <-> shard_cid`
   - required because one shard can belong to multiple roots
-  - do not collapse this into a `root_cid` column on `shards`
+  - also carries propagated `piece_cid` plus commit workflow state
 
 - `failures`
   - shared across stages via `stage`
   - one current failure row per `(stage, shard_cid)`
 
+- `migration_metadata`
+  - one logical row per backup dir
+  - stores:
+    - `client_wallet`
+    - `service_url`
+    - `provider_address`
+    - `data_set_id`
+    - `client_data_set_id`
+    - migration `state`
+
 Important invariants:
 
 - `shards` is the canonical deduplicated shard table
 - `root_shards` is the canonical root membership table
+- `root_shards` is also the canonical commit work table
 - `failures` stores current retry/error state, not append-only history
 - `download_status` belongs to the download stage only, but is intentionally kept
   on `shards` as a pragmatic scheduler optimization

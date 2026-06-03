@@ -10,11 +10,10 @@
  */
 
 import { writeFile } from 'node:fs/promises'
-
-import { runRepiece } from './repiece-runner.mjs'
-import { openCheckpointDb } from './checkpoint-db.mjs'
 import { jsonStateAdapter } from './adapters/json-state-adapter.mjs'
 import { sqliteStateAdapter } from './adapters/sqlite-state-adapter.mjs'
+import { openCheckpointDb } from './checkpoint-db.mjs'
+import { runRepiece } from './repiece-runner.mjs'
 
 const DEFAULT_CONCURRENCY = 8
 

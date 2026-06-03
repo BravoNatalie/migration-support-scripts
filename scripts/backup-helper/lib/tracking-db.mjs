@@ -22,6 +22,22 @@ const FAILURE_STAGE = {
   prepare: 'prepare',
 }
 
+const COMMIT_STATUS = {
+  pending: 'pending',
+  parked: 'parked',
+  committing: 'committing',
+  committed: 'committed',
+  failed: 'failed',
+}
+
+const MIGRATION_STATE = {
+  pending: 'pending',
+  migrating: 'migrating',
+  complete: 'complete',
+  incomplete: 'incomplete',
+  failed: 'failed',
+}
+
 /**
  * @typedef {object} ShardForManifest
  * @property {string} shardCid
@@ -55,6 +71,24 @@ const FAILURE_STAGE = {
  * @typedef {object} PrepareCandidate
  * @property {string} shardCid
  * @property {string | null} pieceCid
+ */
+
+/**
+ * @typedef {object} CommitCandidate
+ * @property {string} rootCid
+ * @property {string} shardCid
+ * @property {string} pieceCid
+ */
+
+/**
+ * @typedef {object} MigrationMetadata
+ * @property {string} clientWallet
+ * @property {string} serviceUrl
+ * @property {string} providerAddress
+ * @property {number | null} dataSetId
+ * @property {number | null} clientDataSetId
+ * @property {string} state
+ * @property {number} updatedAt
  */
 
 function now() {
@@ -110,6 +144,16 @@ export function openTrackingDb(dir) {
       FOREIGN KEY (shard_cid) REFERENCES shards(shard_cid)
     );
 
+    CREATE TABLE IF NOT EXISTS migration_metadata (
+      client_wallet TEXT NOT NULL,
+      service_url   TEXT NOT NULL,
+      provider_address TEXT NOT NULL,
+      data_set_id   INTEGER,
+      client_data_set_id TEXT,
+      state         TEXT NOT NULL DEFAULT 'pending',
+      updated_at    INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS failures (
       stage         TEXT NOT NULL,
       shard_cid     TEXT NOT NULL,
@@ -129,8 +173,29 @@ export function openTrackingDb(dir) {
   if (!hasColumn(db, 'root_shards', 'piece_cid')) {
     db.exec('ALTER TABLE root_shards ADD COLUMN piece_cid TEXT')
   }
+  if (!hasColumn(db, 'root_shards', 'commit_status')) {
+    db.exec(`ALTER TABLE root_shards ADD COLUMN commit_status TEXT NOT NULL DEFAULT '${COMMIT_STATUS.pending}'`)
+  }
+  if (!hasColumn(db, 'root_shards', 'commit_attempts')) {
+    db.exec('ALTER TABLE root_shards ADD COLUMN commit_attempts INTEGER NOT NULL DEFAULT 0')
+  }
+  if (!hasColumn(db, 'root_shards', 'last_commit_error')) {
+    db.exec('ALTER TABLE root_shards ADD COLUMN last_commit_error TEXT')
+  }
+  if (!hasColumn(db, 'root_shards', 'tx_hash')) {
+    db.exec('ALTER TABLE root_shards ADD COLUMN tx_hash TEXT')
+  }
+  if (!hasColumn(db, 'root_shards', 'updated_at')) {
+    db.exec('ALTER TABLE root_shards ADD COLUMN updated_at INTEGER')
+  }
 
   db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_root_shards_piece_cid
+     ON root_shards(piece_cid);
+
+    CREATE INDEX IF NOT EXISTS idx_root_shards_commit_status
+      ON root_shards(commit_status, piece_cid, root_cid);
+
     CREATE INDEX IF NOT EXISTS idx_root_shards_shard_cid
       ON root_shards(shard_cid);
   `)
@@ -247,6 +312,102 @@ export function openTrackingDb(dir) {
     WHERE shard_cid = ?
   `)
 
+  const insertMigrationMetadataStmt = db.prepare(`
+    INSERT INTO migration_metadata (client_wallet, service_url, provider_address, data_set_id, client_data_set_id, state, updated_at)
+    VALUES (?, ?, ?, NULL, NULL, ?, ?)
+  `)
+
+  const getMigrationMetadataStmt = db.prepare(`
+    SELECT client_wallet, service_url, provider_address, data_set_id, client_data_set_id, state, updated_at
+    FROM migration_metadata
+    LIMIT 1
+  `)
+
+  const updateMigrationStateStmt = db.prepare(`
+    UPDATE migration_metadata
+    SET state = ?, updated_at = ?
+  `)
+
+  const updateMigrationClientDataSetIdStmt = db.prepare(`
+    UPDATE migration_metadata
+    SET client_data_set_id = COALESCE(client_data_set_id, ?),
+        updated_at = ?
+  `)
+
+  const updateMigrationMetadataStmt = db.prepare(`
+    UPDATE migration_metadata
+    SET data_set_id = COALESCE(data_set_id, ?),
+        client_data_set_id = COALESCE(client_data_set_id, ?),
+        state = ?,
+        updated_at = ?
+  `)
+
+  const retryCommitRowsStmt = db.prepare(`
+    UPDATE root_shards
+    SET commit_status = '${COMMIT_STATUS.parked}',
+        last_commit_error = NULL,
+        tx_hash = NULL,
+        updated_at = ?
+    WHERE commit_status IN ('${COMMIT_STATUS.failed}', '${COMMIT_STATUS.committing}')
+  `)
+
+  const markParkedByPieceCidStmt = db.prepare(`
+    UPDATE root_shards
+    SET commit_status = '${COMMIT_STATUS.parked}',
+        updated_at = ?
+    WHERE piece_cid = ?
+      AND commit_status = '${COMMIT_STATUS.pending}'
+  `)
+
+  const claimCommitCandidatesStmt = db.prepare(`
+    SELECT root_cid, shard_cid, piece_cid
+    FROM root_shards
+    WHERE commit_status = '${COMMIT_STATUS.parked}'
+      AND piece_cid IS NOT NULL
+    ORDER BY piece_cid, root_cid
+    LIMIT ?
+  `)
+
+  const markClaimedCommitRowStmt = db.prepare(`
+    UPDATE root_shards
+    SET commit_status = '${COMMIT_STATUS.committing}',
+        updated_at = ?
+    WHERE root_cid = ?
+      AND shard_cid = ?
+      AND commit_status = '${COMMIT_STATUS.parked}'
+  `)
+
+  const markCommittedRowStmt = db.prepare(`
+    UPDATE root_shards
+    SET commit_status = '${COMMIT_STATUS.committed}',
+        last_commit_error = NULL,
+        tx_hash = ?,
+        updated_at = ?
+    WHERE root_cid = ?
+      AND shard_cid = ?
+  `)
+
+  const markCommitFailedRowStmt = db.prepare(`
+    UPDATE root_shards
+    SET commit_status = '${COMMIT_STATUS.failed}',
+        commit_attempts = commit_attempts + 1,
+        last_commit_error = ?,
+        tx_hash = NULL,
+        updated_at = ?
+    WHERE root_cid = ?
+      AND shard_cid = ?
+  `)
+
+  const commitStatsStmt = db.prepare(`
+    SELECT
+      SUM(CASE WHEN commit_status = '${COMMIT_STATUS.pending}' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN commit_status = '${COMMIT_STATUS.parked}' THEN 1 ELSE 0 END) AS parked,
+      SUM(CASE WHEN commit_status = '${COMMIT_STATUS.committing}' THEN 1 ELSE 0 END) AS committing,
+      SUM(CASE WHEN commit_status = '${COMMIT_STATUS.committed}' THEN 1 ELSE 0 END) AS committed,
+      SUM(CASE WHEN commit_status = '${COMMIT_STATUS.failed}' THEN 1 ELSE 0 END) AS failed
+    FROM root_shards
+  `)
+
   const insertFailureStmt = db.prepare(`
     INSERT INTO failures (stage, shard_cid, url, status_code, error, retryable, attempts, last_attempt)
     VALUES (?, ?, ?, ?, ?, ?, 1, ?)
@@ -274,6 +435,7 @@ export function openTrackingDb(dir) {
 
   return {
     DOWNLOAD_STATUS,
+    MIGRATION_STATE,
 
     /**
      * Bulk-load shard rows from an iterator. Wraps the load in a single
@@ -514,6 +676,181 @@ export function openTrackingDb(dir) {
         queued: Number(row.queued || 0),
         active: Number(row.active || 0),
         error: Number(row.error || 0),
+      }
+    },
+
+    /**
+     * @param {object} metadata
+     * @param {string} metadata.clientWallet
+     * @param {string} metadata.serviceUrl
+     * @param {string} metadata.providerAddress
+     */
+    initMigrationMetadata({ clientWallet, serviceUrl, providerAddress }) {
+      const existing = getMigrationMetadataStmt.get()
+      if (!existing) {
+        insertMigrationMetadataStmt.run(clientWallet, serviceUrl, providerAddress, MIGRATION_STATE.pending, now())
+        return
+      }
+
+      if (existing.client_wallet.toString() !== clientWallet) {
+        throw new Error(
+          `commit: customer wallet does not match existing migration metadata (${existing.client_wallet.toString()})`,
+        )
+      }
+
+      const existingServiceUrl = existing.service_url.toString()
+      if (existingServiceUrl !== serviceUrl) {
+        throw new Error(`commit: service URL does not match existing migration metadata (${existingServiceUrl})`)
+      }
+
+      const existingProviderAddress = existing.provider_address.toString()
+      if (existingProviderAddress !== providerAddress) {
+        throw new Error(
+          `commit: provider address does not match existing migration metadata (${existingProviderAddress})`,
+        )
+      }
+    },
+
+    /**
+     * @returns {MigrationMetadata | null}
+     */
+    getMigrationMetadata() {
+      const row = getMigrationMetadataStmt.get()
+      if (!row) return null
+
+      return {
+        clientWallet: row.client_wallet.toString(),
+        serviceUrl: row.service_url.toString(),
+        providerAddress: row.provider_address.toString(),
+        dataSetId: row.data_set_id != null ? Number(row.data_set_id) : null,
+        clientDataSetId: row.client_data_set_id != null ? Number(row.client_data_set_id) : null,
+        state: row.state.toString(),
+        updatedAt: Number(row.updated_at),
+      }
+    },
+
+    /**
+     * @param {string} state
+     */
+    setMigrationState(state) {
+      updateMigrationStateStmt.run(state, now())
+    },
+
+    /**
+     * @param {number} clientDataSetId
+     */
+    setMigrationClientDataSetId(clientDataSetId) {
+      updateMigrationClientDataSetIdStmt.run(clientDataSetId, now())
+    },
+
+    /**
+     * @param {object} metadata
+     * @param {number} metadata.dataSetId
+     * @param {number} metadata.clientDataSetId
+     */
+    markMigrationDataSetCreated({ dataSetId, clientDataSetId }) {
+      updateMigrationMetadataStmt.run(dataSetId, clientDataSetId, MIGRATION_STATE.migrating, now())
+    },
+
+    resetCommitRowsForRetry() {
+      return Number(retryCommitRowsStmt.run(now()).changes || 0)
+    },
+
+    /**
+     * @param {string[]} pieceCids
+     */
+    markParkedByPieceCids(pieceCids) {
+      if (pieceCids.length === 0) return 0
+
+      const timestamp = now()
+      let changed = 0
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const pieceCid of pieceCids) {
+          changed += Number(markParkedByPieceCidStmt.run(timestamp, pieceCid).changes || 0)
+        }
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+      return changed
+    },
+
+    /**
+     * @param {number} limit
+     * @returns {CommitCandidate[]}
+     */
+    claimCommitBatch(limit) {
+      /** @type {CommitCandidate[]} */
+      const claimed = []
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        const rows = claimCommitCandidatesStmt.all(limit)
+        for (const row of rows) {
+          const changes = Number(markClaimedCommitRowStmt.run(timestamp, row.root_cid, row.shard_cid).changes || 0)
+          if (changes === 0) continue
+
+          claimed.push({
+            rootCid: row.root_cid.toString(),
+            shardCid: row.shard_cid.toString(),
+            pieceCid: row.piece_cid.toString(),
+          })
+        }
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+      return claimed
+    },
+
+    /**
+     * @param {CommitCandidate[]} rows
+     * @param {string} txHash
+     */
+    markCommitBatchSucceeded(rows, txHash) {
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const row of rows) {
+          markCommittedRowStmt.run(txHash, timestamp, row.rootCid, row.shardCid)
+        }
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /**
+     * @param {CommitCandidate[]} rows
+     * @param {string} error
+     */
+    markCommitBatchFailed(rows, error) {
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const row of rows) {
+          markCommitFailedRowStmt.run(error, timestamp, row.rootCid, row.shardCid)
+        }
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /** Commit status counts across root_shards. */
+    getCommitStats() {
+      const row = commitStatsStmt.get()
+      return {
+        pending: Number(row.pending || 0),
+        parked: Number(row.parked || 0),
+        committing: Number(row.committing || 0),
+        committed: Number(row.committed || 0),
+        failed: Number(row.failed || 0),
       }
     },
 

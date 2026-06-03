@@ -187,6 +187,7 @@ async function runParkingBinary(dir, target) {
 
   let parsed
   try {
+    console.log(`Parking binary output: ${result.stdout}`)
     parsed = JSON.parse(result.stdout || '{}')
   } catch (err) {
     throw new Error(`commit: parking command returned invalid JSON: ${err?.message || err}`)

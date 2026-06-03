@@ -10,21 +10,11 @@ async function streamPieceCid(url, signal) {
   return calculateFromIterable(iter())
 }
 
-export async function runRepiece({
-  checkpoint,
-  candidates,
-  concurrency,
-  limit,
-  summary,
-}) {
-  const totalCandidates = Number.isFinite(limit)
-    ? Math.min(summary.totalCandidates, limit)
-    : summary.totalCandidates
+export async function runRepiece({ checkpoint, candidates, concurrency, limit, summary }) {
+  const totalCandidates = Number.isFinite(limit) ? Math.min(summary.totalCandidates, limit) : summary.totalCandidates
   const totalBytes = summary.totalBytes
 
-  console.error(
-    `Queue: up to ${totalCandidates} shards to compute (concurrency=${concurrency})`,
-  )
+  console.error(`Queue: up to ${totalCandidates} shards to compute (concurrency=${concurrency})`)
   if (totalCandidates === 0) {
     console.error('Nothing to do.')
     return
@@ -61,11 +51,7 @@ export async function runRepiece({
         ok++
         bytesDone += item.sizeBytes
       } catch (err) {
-        checkpoint.insertFailure(
-          item.cid,
-          item.sourceURL,
-          String(err?.message || err),
-        )
+        checkpoint.insertFailure(item.cid, item.sourceURL, String(err?.message || err))
         failed++
       } finally {
         seen++

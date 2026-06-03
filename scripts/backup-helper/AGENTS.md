@@ -162,7 +162,8 @@ Current behavior:
 - commit requires:
   - `--dir`
   - `--target`
-  - `--provider-id`
+  - `--service-url`
+  - `--provider-address`
   - `--session-key`
   - `--customer-wallet`
 - parking shells out to:
@@ -171,9 +172,8 @@ Current behavior:
   - `{ count, pieces }`
 - parking marks matching `root_shards` rows from `pending` to `parked`
 - commit claims flat root-level batches ordered by `(piece_cid, root_cid)`
-- the first successful commit creates the dataset and persists
-  `migration_metadata.data_set_id`
-- later commit batches can run concurrently
+- the dataset is created first with no pieces and persisted before parking/commit lanes start
+- later `addPieces` batches can run concurrently
 - `--retry` revives `failed` and `committing` rows back to `parked`
 
 Important design choices:
@@ -210,8 +210,10 @@ Main tables:
   - one logical row per backup dir
   - stores:
     - `client_wallet`
-    - `provider_id`
+    - `service_url`
+    - `provider_address`
     - `data_set_id`
+    - `client_data_set_id`
     - migration `state`
 
 Important invariants:

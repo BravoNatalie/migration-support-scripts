@@ -83,27 +83,16 @@ const MIGRATION_STATE = {
 /**
  * @typedef {object} MigrationMetadata
  * @property {string} clientWallet
- * @property {number} providerId
+ * @property {string} serviceUrl
+ * @property {string} providerAddress
  * @property {number | null} dataSetId
+ * @property {number | null} clientDataSetId
  * @property {string} state
  * @property {number} updatedAt
  */
 
 function now() {
   return Date.now()
-}
-
-/**
- * @param {DatabaseSync} db
- * @param {string} tableName
- * @param {string} columnName
- */
-function hasColumn(db, tableName, columnName) {
-  const pragma = db.prepare(`PRAGMA table_info(${tableName})`)
-  for (const row of pragma.iterate()) {
-    if (row.name?.toString() === columnName) return true
-  }
-  return false
 }
 
 /**
@@ -157,8 +146,10 @@ export function openTrackingDb(dir) {
 
     CREATE TABLE IF NOT EXISTS migration_metadata (
       client_wallet TEXT NOT NULL,
-      provider_id   INTEGER NOT NULL,
+      service_url   TEXT NOT NULL,
+      provider_address TEXT NOT NULL,
       data_set_id   INTEGER,
+      client_data_set_id TEXT,
       state         TEXT NOT NULL DEFAULT 'pending',
       updated_at    INTEGER NOT NULL
     );
@@ -200,7 +191,7 @@ export function openTrackingDb(dir) {
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_root_shards_piece_cid
-      ON root_shards(piece_cid);
+     ON root_shards(piece_cid);
 
     CREATE INDEX IF NOT EXISTS idx_root_shards_commit_status
       ON root_shards(commit_status, piece_cid, root_cid);
@@ -322,12 +313,12 @@ export function openTrackingDb(dir) {
   `)
 
   const insertMigrationMetadataStmt = db.prepare(`
-    INSERT INTO migration_metadata (client_wallet, provider_id, data_set_id, state, updated_at)
-    VALUES (?, ?, NULL, ?, ?)
+    INSERT INTO migration_metadata (client_wallet, service_url, provider_address, data_set_id, client_data_set_id, state, updated_at)
+    VALUES (?, ?, ?, NULL, NULL, ?, ?)
   `)
 
   const getMigrationMetadataStmt = db.prepare(`
-    SELECT client_wallet, provider_id, data_set_id, state, updated_at
+    SELECT client_wallet, service_url, provider_address, data_set_id, client_data_set_id, state, updated_at
     FROM migration_metadata
     LIMIT 1
   `)
@@ -337,9 +328,18 @@ export function openTrackingDb(dir) {
     SET state = ?, updated_at = ?
   `)
 
+  const updateMigrationClientDataSetIdStmt = db.prepare(`
+    UPDATE migration_metadata
+    SET client_data_set_id = COALESCE(client_data_set_id, ?),
+        updated_at = ?
+  `)
+
   const updateMigrationMetadataStmt = db.prepare(`
     UPDATE migration_metadata
-    SET data_set_id = COALESCE(data_set_id, ?), state = ?, updated_at = ?
+    SET data_set_id = COALESCE(data_set_id, ?),
+        client_data_set_id = COALESCE(client_data_set_id, ?),
+        state = ?,
+        updated_at = ?
   `)
 
   const retryCommitRowsStmt = db.prepare(`
@@ -619,24 +619,6 @@ export function openTrackingDb(dir) {
      */
     setRootShardsPieceCid(shardCid, pieceCid) {
       setRootShardsPieceCidStmt.run(pieceCid, now(), shardCid)
-      const timestamp = now()
-      db.exec('BEGIN IMMEDIATE')
-      try {
-        setPieceCidStmt.run(pieceCid, timestamp, shardCid)
-        setRootShardsPieceCidStmt.run(pieceCid, timestamp, shardCid)
-        db.exec('COMMIT')
-      } catch (err) {
-        db.exec('ROLLBACK')
-        throw err
-      }
-    },
-
-    /**
-     * @param {string} shardCid
-     * @param {string} pieceCid
-     */
-    setRootShardsPieceCid(shardCid, pieceCid) {
-      setRootShardsPieceCidStmt.run(pieceCid, now(), shardCid)
     },
 
     /**
@@ -700,12 +682,13 @@ export function openTrackingDb(dir) {
     /**
      * @param {object} metadata
      * @param {string} metadata.clientWallet
-     * @param {number} metadata.providerId
+     * @param {string} metadata.serviceUrl
+     * @param {string} metadata.providerAddress
      */
-    initMigrationMetadata({ clientWallet, providerId }) {
+    initMigrationMetadata({ clientWallet, serviceUrl, providerAddress }) {
       const existing = getMigrationMetadataStmt.get()
       if (!existing) {
-        insertMigrationMetadataStmt.run(clientWallet, providerId, MIGRATION_STATE.pending, now())
+        insertMigrationMetadataStmt.run(clientWallet, serviceUrl, providerAddress, MIGRATION_STATE.pending, now())
         return
       }
 
@@ -715,8 +698,16 @@ export function openTrackingDb(dir) {
         )
       }
 
-      if (Number(existing.provider_id) !== providerId) {
-        throw new Error(`commit: provider ID does not match existing migration metadata (${existing.provider_id})`)
+      const existingServiceUrl = existing.service_url.toString()
+      if (existingServiceUrl !== serviceUrl) {
+        throw new Error(`commit: service URL does not match existing migration metadata (${existingServiceUrl})`)
+      }
+
+      const existingProviderAddress = existing.provider_address.toString()
+      if (existingProviderAddress !== providerAddress) {
+        throw new Error(
+          `commit: provider address does not match existing migration metadata (${existingProviderAddress})`,
+        )
       }
     },
 
@@ -729,8 +720,10 @@ export function openTrackingDb(dir) {
 
       return {
         clientWallet: row.client_wallet.toString(),
-        providerId: Number(row.provider_id),
+        serviceUrl: row.service_url.toString(),
+        providerAddress: row.provider_address.toString(),
         dataSetId: row.data_set_id != null ? Number(row.data_set_id) : null,
+        clientDataSetId: row.client_data_set_id != null ? Number(row.client_data_set_id) : null,
         state: row.state.toString(),
         updatedAt: Number(row.updated_at),
       }
@@ -741,6 +734,22 @@ export function openTrackingDb(dir) {
      */
     setMigrationState(state) {
       updateMigrationStateStmt.run(state, now())
+    },
+
+    /**
+     * @param {number} clientDataSetId
+     */
+    setMigrationClientDataSetId(clientDataSetId) {
+      updateMigrationClientDataSetIdStmt.run(clientDataSetId, now())
+    },
+
+    /**
+     * @param {object} metadata
+     * @param {number} metadata.dataSetId
+     * @param {number} metadata.clientDataSetId
+     */
+    markMigrationDataSetCreated({ dataSetId, clientDataSetId }) {
+      updateMigrationMetadataStmt.run(dataSetId, clientDataSetId, MIGRATION_STATE.migrating, now())
     },
 
     resetCommitRowsForRetry() {
@@ -799,18 +808,12 @@ export function openTrackingDb(dir) {
 
     /**
      * @param {CommitCandidate[]} rows
-     * @param {object} result
-     * @param {string} result.txHash
-     * @param {number | null} result.dataSetId
+     * @param {string} txHash
      */
-    markCommitBatchSucceeded(rows, { txHash, dataSetId }) {
+    markCommitBatchSucceeded(rows, txHash) {
       const timestamp = now()
       db.exec('BEGIN IMMEDIATE')
       try {
-        if (dataSetId != null) {
-          updateMigrationMetadataStmt.run(dataSetId, MIGRATION_STATE.migrating, timestamp)
-        }
-
         for (const row of rows) {
           markCommittedRowStmt.run(txHash, timestamp, row.rootCid, row.shardCid)
         }

@@ -7,7 +7,8 @@
 
 import { parse as parsePieceCid } from '@filoz/synapse-core/piece'
 import { fromSecp256k1 } from '@filoz/synapse-core/session-key'
-import { Synapse } from '@filoz/synapse-sdk'
+import { addPieces, createDataSet, waitForAddPieces, waitForCreateDataSet } from '@filoz/synapse-core/sp'
+import { getDataSet } from '@filoz/synapse-core/warm-storage'
 import { execa } from 'execa'
 import { getAddress } from 'viem/utils'
 import { z } from 'zod'
@@ -36,53 +37,84 @@ function sleep(ms) {
 /**
  * @param {`0x${string}`} sessionKeyStr
  * @param {`0x${string}`} customerWallet
- * @param {import('@filoz/synapse-sdk').Chain} chain
+ * @param {import('viem').Chain} chain
  */
-async function loadSynapse(sessionKeyStr, customerWallet, chain) {
+async function createSessionKey(sessionKeyStr, customerWallet, chain) {
   const customerAccount = getAddress(customerWallet)
   const sessionKey = fromSecp256k1({
     privateKey: sessionKeyStr,
     root: customerAccount, // owner address, not private key
     chain,
   })
-
-  // Required: sync on-chain permissions before use
   await sessionKey.syncExpirations()
-
-  return Synapse.create({
-    account: customerAccount,
-    sessionKey,
-    chain,
-    source: 'storage-migration',
-  })
+  return sessionKey
 }
 
 /**
+ * Create or load the dataset before any parking/commit work starts.
+ *
  * @param {object} args
- * @param {import('@filoz/synapse-sdk').Chain} args.chain
- * @param {string} args.customerWallet
- * @param {string} args.sessionKey
- * @param {number} args.providerId
- * @param {number | null} args.dataSetId
+ * @param {TrackingDb} args.tracking
+ * @param {ReturnType<typeof fromSecp256k1>} args.sessionKey
+ * @param {string} args.serviceUrl
+ * @param {`0x${string}`} args.providerAddress
  */
-async function createCommitContext({ chain, customerWallet, sessionKey, providerId, dataSetId }) {
-  const synapse = await loadSynapse(
-    /** @type {`0x${string}`} */ (sessionKey),
-    /** @type {`0x${string}`} */ (customerWallet),
-    chain,
-  )
+async function ensureDataSet({ tracking, sessionKey, serviceUrl, providerAddress }) {
+  const metadata = tracking.getMigrationMetadata()
+  if (!metadata) {
+    throw new Error('commit: migration metadata was not initialized')
+  }
 
-  const options = {
-    withCDN: true,
+  if (metadata.dataSetId != null) {
+    if (metadata.clientDataSetId == null) {
+      const dataSetInfo = await getDataSet(sessionKey.client, {
+        dataSetId: BigInt(metadata.dataSetId),
+      })
+      if (!dataSetInfo) {
+        throw new Error(`commit: dataset ${metadata.dataSetId} was not found on-chain`)
+      }
+      tracking.setMigrationClientDataSetId(Number(dataSetInfo.clientDataSetId))
+      return {
+        dataSetId: metadata.dataSetId,
+        clientDataSetId: Number(dataSetInfo.clientDataSetId),
+      }
+    }
+
+    if (metadata.state !== tracking.MIGRATION_STATE.complete) {
+      tracking.setMigrationState(tracking.MIGRATION_STATE.migrating)
+    }
+
+    return {
+      dataSetId: metadata.dataSetId,
+      clientDataSetId: metadata.clientDataSetId,
+    }
+  }
+
+  const createResult = await createDataSet(sessionKey.client, {
+    cdn: true,
+    payee: providerAddress,
+    payer: sessionKey.rootAddress,
+    serviceURL: serviceUrl,
     metadata: {
       source: 'filecoin-pin',
       withIPFSIndexing: '',
     },
-    ...(providerId != null && { providerId: BigInt(providerId) }),
-    ...(dataSetId != null && { dataSetId: BigInt(dataSetId) }),
+  })
+  const { dataSetId } = await waitForCreateDataSet(createResult)
+  const dataSetInfo = await getDataSet(sessionKey.client, { dataSetId })
+  if (!dataSetInfo) {
+    throw new Error(`commit: dataset ${dataSetId} was created but could not be fetched`)
   }
 
-  return synapse.storage.createContext(options)
+  tracking.markMigrationDataSetCreated({
+    dataSetId: Number(dataSetId),
+    clientDataSetId: Number(dataSetInfo.clientDataSetId),
+  })
+
+  return {
+    dataSetId: Number(dataSetId),
+    clientDataSetId: Number(dataSetInfo.clientDataSetId),
+  }
 }
 
 function renderCommitProgress(summary) {
@@ -139,49 +171,61 @@ async function runParkingBinary(dir, target) {
 function buildCommitPieces(rows) {
   return rows.map((row) => ({
     pieceCid: parsePieceCid(row.pieceCid),
-    pieceMetadata: { ipfsRootCID: row.rootCid },
+    metadata: { ipfsRootCID: row.rootCid },
   }))
 }
 
 /**
  * @param {object} args
- * @param {import('@filoz/synapse-sdk/storage').StorageContext} args.context
+ * @param {ReturnType<typeof fromSecp256k1>} args.sessionKey
+ * @param {string} args.serviceUrl
+ * @param {number} args.dataSetId
+ * @param {number} args.clientDataSetId
  * @param {TrackingDb} args.tracking
  * @param {CommitRow[]} args.rows
  */
-async function commitBatch({ tracking, rows, context }) {
+async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId, tracking, rows }) {
   try {
-    const commitPieces = buildCommitPieces(rows)
-    const extraData = await context.presignForCommit(commitPieces)
-    const result = await context.commit({
-      pieces: commitPieces,
-      extraData,
+    const addResult = await addPieces(sessionKey.client, {
+      serviceURL: serviceUrl,
+      dataSetId: BigInt(dataSetId),
+      clientDataSetId: BigInt(clientDataSetId),
+      pieces: buildCommitPieces(rows),
     })
+    const addStatus = await waitForAddPieces({ statusUrl: addResult.statusUrl })
 
-    tracking.markCommitBatchSucceeded(rows, {
-      txHash: result.txHash.toString(),
-      dataSetId: result.isNewDataSet ? Number(result.dataSetId) : null,
-    })
+    tracking.markCommitBatchSucceeded(rows, addStatus.txHash.toString())
 
-    return { success: true, createdDataSet: result.isNewDataSet }
+    return { success: true }
   } catch (err) {
     tracking.markCommitBatchFailed(rows, String(err?.message || err))
-    return { success: false, createdDataSet: false }
+    return { success: false }
   }
 }
 
 /**
  * @param {object} args
  * @param {string} args.dir
- * @param {number} args.providerId
- * @param {string} args.customerWallet
+ * @param {string} args.serviceUrl
+ * @param {`0x${string}`} args.providerAddress
+ * @param {`0x${string}`} args.customerWallet
  * @param {string} args.sessionKey
- * @param {import('@filoz/synapse-sdk').Chain} args.chain
+ * @param {import('viem').Chain} args.chain
  * @param {string} args.target
  * @param {number | undefined} args.concurrency
  * @param {boolean} args.retry
  */
-export async function runCommit({ dir, providerId, customerWallet, sessionKey, chain, target, concurrency, retry }) {
+export async function runCommit({
+  dir,
+  serviceUrl,
+  providerAddress,
+  customerWallet,
+  sessionKey,
+  chain,
+  target,
+  concurrency,
+  retry,
+}) {
   const tracking = openTrackingDb(dir)
   const commitConcurrency = concurrency ?? DEFAULT_COMMIT_CONCURRENCY
   let metadataInitialized = false
@@ -191,29 +235,20 @@ export async function runCommit({ dir, providerId, customerWallet, sessionKey, c
   let parkingFailed = false
 
   try {
-    tracking.initMigrationMetadata({ clientWallet: customerWallet, providerId })
+    tracking.initMigrationMetadata({ clientWallet: customerWallet, serviceUrl, providerAddress })
     metadataInitialized = true
     if (retry) {
       tracking.resetCommitRowsForRetry()
     }
 
-    const metadata = tracking.getMigrationMetadata()
-    if (!metadata) {
-      throw new Error('commit: migration metadata was not initialized')
-    }
-    if (metadata.dataSetId != null && metadata.state !== tracking.MIGRATION_STATE.complete) {
-      tracking.setMigrationState(tracking.MIGRATION_STATE.migrating)
-    }
-
-    const context = await createCommitContext({
-      chain,
-      customerWallet,
-      sessionKey,
-      providerId,
-      dataSetId: metadata.dataSetId,
+    const session = await createSessionKey(/** @type {`0x${string}`} */ (sessionKey), customerWallet, chain)
+    const ensuredDataSet = await ensureDataSet({
+      tracking,
+      sessionKey: session,
+      serviceUrl,
+      providerAddress,
     })
 
-    // TODO: validate the parking lane behavior with the actual binary
     const parkingLane = (async () => {
       try {
         while (true) {
@@ -239,28 +274,23 @@ export async function runCommit({ dir, providerId, customerWallet, sessionKey, c
           continue
         }
 
-        await commitBatch({ tracking, rows, context })
+        await commitBatch({
+          sessionKey: session,
+          serviceUrl,
+          dataSetId: ensuredDataSet.dataSetId,
+          clientDataSetId: ensuredDataSet.clientDataSetId,
+          tracking,
+          rows,
+        })
         renderCommitProgress(tracking.getCommitStats())
       }
     }
 
     const commitLane = (async () => {
-      // bootstrap commit lane, first commit will create the dataset
-      while (context.dataSetId == null) {
-        const rows = tracking.claimCommitBatch(COMMIT_BATCH_SIZE)
-        if (rows.length === 0) {
-          if (parkingSettled) return
-          await sleep(EMPTY_POLL_INTERVAL_MS)
-          continue
-        }
-
-        await commitBatch({ tracking, rows, context })
-        renderCommitProgress(tracking.getCommitStats())
-      }
-
       const workers = Array.from({ length: commitConcurrency }, () => commitWorker())
       const workerResults = await Promise.allSettled(workers)
       let rejectedWorker = null
+
       for (const [index, result] of workerResults.entries()) {
         if (result.status === 'rejected') {
           console.error(`commit: worker ${index + 1} rejected unexpectedly: ${result.reason?.message || result.reason}`)

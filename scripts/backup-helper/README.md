@@ -14,7 +14,7 @@ The input DB is treated as strictly read-only, and all derived state lives in `t
 node scripts/backup-helper/index.mjs create   --db <space-inventory.db> --dir <output-dir>
 node scripts/backup-helper/index.mjs download --dir <output-dir> [--port N] [--concurrency N]
 node scripts/backup-helper/index.mjs prepare  --dir <output-dir> [--concurrency N]
-node scripts/backup-helper/index.mjs commit   --dir <output-dir> --target <curio-piece-dir> --provider-id N --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
+node scripts/backup-helper/index.mjs commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
 ```
 
 - `create` — read the input DB, deduplicate by `shard_cid` across every space,
@@ -65,7 +65,8 @@ node scripts/backup-helper/index.mjs prepare \
 node scripts/backup-helper/index.mjs commit \
   --dir /path/to/backup-dir \
   --target /path/to/curio-storage/piece \
-  --provider-id 123 \
+  --service-url https://pdp.example.com/ \
+  --provider-address 0x... \
   --session-key 0x... \
   --customer-wallet 0x...
 ```

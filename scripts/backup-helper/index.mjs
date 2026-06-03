@@ -9,7 +9,7 @@
  *             Run aria2 via RPC; CARs land in <dir>/shards/. If omitted, --port
  *             defaults to a free localhost port chosen at runtime.
  *   prepare   --dir <output-dir> [--concurrency N]
- *   commit    --dir <output-dir> --target <curio-piece-dir> --provider-id N --session-key 0x... --customer-wallet 0x...
+ *   commit    --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x...
  *             [--network mainnet|calibration] [--concurrency N] [--retry]
  */
 
@@ -17,7 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
-import { calibration, mainnet } from '@filoz/synapse-sdk'
+import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import { isAddress } from 'viem/utils'
 import { runCommit } from './commands/commit.mjs'
 import { runCreate } from './commands/create.mjs'
@@ -29,7 +29,7 @@ function usage() {
   backup-helper create   --db <space-inventory.db> --dir <output-dir>
   backup-helper download --dir <output-dir> [--concurrency N] [--port N]
   backup-helper prepare  --dir <output-dir> [--concurrency N]
-  backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --provider-id N --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]`)
+  backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]`)
 }
 
 /**
@@ -100,6 +100,41 @@ function parseCommitNetwork(network) {
 
   console.error(`Error: invalid network "${network}". Expected "mainnet" or "calibration".`)
   process.exit(1)
+}
+
+/**
+ * @param {string | undefined} value
+ */
+function requireServiceUrl(value) {
+  if (!value) {
+    console.error('Error: commit: missing required --service-url <https://...> argument')
+    process.exit(1)
+  }
+
+  try {
+    return new URL(value).toString()
+  } catch {
+    console.error(`Error: commit: invalid --service-url value: ${value}`)
+    process.exit(1)
+  }
+}
+
+/**
+ * @param {string | undefined} value
+ * @param {string} optionName
+ */
+function parseAddress(value, optionName) {
+  if (!value) {
+    console.error(`Error: commit: missing required ${optionName} <0x...> argument`)
+    process.exit(1)
+  }
+
+  if (!isAddress(value)) {
+    console.error(`commit: invalid ${optionName} address: ${value}`)
+    process.exit(1)
+  }
+
+  return value
 }
 
 async function create(argv) {
@@ -204,7 +239,8 @@ async function commit(argv) {
       options: {
         dir: { type: 'string' },
         target: { type: 'string' },
-        'provider-id': { type: 'string' },
+        'service-url': { type: 'string' },
+        'provider-address': { type: 'string' },
         'session-key': { type: 'string' },
         'customer-wallet': { type: 'string' },
         network: { type: 'string' },
@@ -227,26 +263,6 @@ async function commit(argv) {
     console.error('Error: commit: missing required --target <path> argument')
     process.exit(1)
   }
-  if (!values['customer-wallet']) {
-    console.error('Error: commit: missing required --customer-wallet <0x...> argument')
-    process.exit(1)
-  }
-  if (!values['provider-id']) {
-    console.error('Error: commit: missing required --provider-id <number> argument')
-    process.exit(1)
-  }
-
-  const providerId = Number(values['provider-id'])
-  if (!Number.isInteger(providerId) || providerId < 1) {
-    console.error(`Error: commit: --provider-id must be a positive integer (got ${values['provider-id']})`)
-    process.exit(1)
-  }
-
-  const customerWallet = values['customer-wallet']
-  if (!isAddress(customerWallet)) {
-    console.error(`commit: invalid customer wallet address: ${customerWallet}`)
-    process.exit(1)
-  }
 
   const sessionKey = values['session-key']
   if (!/^0x[0-9a-fA-F]{64}$/.test(sessionKey)) {
@@ -255,10 +271,11 @@ async function commit(argv) {
   }
 
   await runCommit({
-    dir: requireDir(values.dir, 'commit'),
-    providerId,
     sessionKey,
-    customerWallet,
+    dir: requireDir(values.dir, 'commit'),
+    serviceUrl: requireServiceUrl(values['service-url']),
+    providerAddress: parseAddress(values['provider-address'], '--provider-address'),
+    customerWallet: parseAddress(values['customer-wallet'], '--customer-wallet'),
     chain: parseCommitNetwork(values.network),
     target: requireDir(values.target, 'commit'),
     concurrency: parseConcurrency(values.concurrency, 'commit'),

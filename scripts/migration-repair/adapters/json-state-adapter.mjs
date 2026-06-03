@@ -18,10 +18,7 @@ function* walkShards(node) {
     for (const v of node) yield* walkShards(v)
     return
   }
-  if (
-    typeof node.cid === 'string' &&
-    (typeof node.sizeBytes === 'string' || typeof node.sizeBytes === 'number')
-  ) {
+  if (typeof node.cid === 'string' && (typeof node.sizeBytes === 'string' || typeof node.sizeBytes === 'number')) {
     yield node
   }
   for (const value of Object.values(node)) {
@@ -200,11 +197,7 @@ export const jsonStateAdapter = {
       shardsCount,
       shardsToStoreRemaining,
       samples,
-      migratable:
-        missingPiece === 0 &&
-        missingSourceURL === 0 &&
-        badSize === 0 &&
-        shardsToStoreRemaining === 0,
+      migratable: missingPiece === 0 && missingSourceURL === 0 && badSize === 0 && shardsToStoreRemaining === 0,
     }
   },
 
@@ -224,10 +217,7 @@ export const jsonStateAdapter = {
         skippedUploads.push({
           space,
           root: cid,
-          sizeBytes:
-            typeof root === 'object' && root?.sizeBytes
-              ? Number(root.sizeBytes)
-              : null,
+          sizeBytes: typeof root === 'object' && root?.sizeBytes ? Number(root.sizeBytes) : null,
           gatewayURL: `https://trustless-gateway.link/ipfs/${cid}?format=car`,
         })
       }
@@ -265,10 +255,7 @@ export const jsonStateAdapter = {
     return {
       thresholdBytes: Number(threshold),
       skippedUploadsCount: skippedUploads.length,
-      skippedUploadsBytes: skippedUploads.reduce(
-        (sum, item) => sum + (item.sizeBytes || 0),
-        0,
-      ),
+      skippedUploadsBytes: skippedUploads.reduce((sum, item) => sum + (item.sizeBytes || 0), 0),
       largeRootsCount: largeRoots.length,
       largeRootsBytes: largeRoots.reduce((sum, item) => sum + item.sizeBytes, 0),
       skippedUploads,

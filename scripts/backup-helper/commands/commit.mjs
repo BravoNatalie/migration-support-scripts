@@ -170,7 +170,11 @@ const parkingResultSchema = z
  * @returns {Promise<ParkingResult>}
  */
 async function runParkingBinary(dir, target) {
-  const result = await execa('curio', [
+  const result = await execa({
+    env: {
+      LANG: 'en_US.UTF-8',
+    },
+  })('curio', [
     'toolbox',
     'import-pieces',
     '--source',

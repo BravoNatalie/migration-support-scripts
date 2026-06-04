@@ -5,6 +5,9 @@
  * provider machine and returns ready-to-commit `pieceCid`s.
  */
 
+import fs from 'node:fs/promises'
+import path from 'node:path'
+
 import { parse as parsePieceCid } from '@filoz/synapse-core/piece'
 import { fromSecp256k1 } from '@filoz/synapse-core/session-key'
 import { addPieces, createDataSet, waitForAddPieces, waitForCreateDataSet } from '@filoz/synapse-core/sp'
@@ -195,9 +198,12 @@ function extractParkingJson(stdout) {
  * @returns {Promise<ParkingResult>}
  */
 async function runParkingBinary(dir, target) {
-  let result
+  // curio toolbox import-pieces now writes its JSON result to a --result file
+  // (commit 7c8297ca "always write in json file"), not stdout. Local patch
+  // pending Natalie shipping the same fix upstream to migration-support-scripts.
+  const resultPath = path.join(dir, '.parking-result.json')
   try {
-    result = await execa({
+    await execa({
       env: {
         LANG: 'en_US.UTF-8',
         GOLOG_LOG_LEVEL: 'error',
@@ -211,17 +217,27 @@ async function runParkingBinary(dir, target) {
       target,
       '--batch-size',
       String(PARKING_BATCH_SIZE),
+      '--result',
+      resultPath,
     ])
   } catch (err) {
-    const message = err?.stderr || err?.stdout || err?.message || String(err)
+    // curio writes the result file even on failure, with an `error` field set
+    let structured
+    try {
+      structured = JSON.parse(await fs.readFile(resultPath, 'utf8'))
+    } catch {}
+    await fs.rm(resultPath, { force: true })
+    const message = structured?.error || err?.stderr || err?.stdout || err?.message || String(err)
     throw new Error(`commit: parking command failed: ${message}`)
   }
 
   let parsed
   try {
-    parsed = JSON.parse(extractParkingJson(result.stdout || ''))
+    parsed = JSON.parse(await fs.readFile(resultPath, 'utf8'))
   } catch (err) {
     throw new Error(`commit: parking command returned invalid JSON: ${err?.message || err}`)
+  } finally {
+    await fs.rm(resultPath, { force: true })
   }
 
   return /** @type {ParkingResult} */ (parkingResultSchema.parse(parsed))

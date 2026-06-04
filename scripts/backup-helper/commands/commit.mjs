@@ -10,6 +10,7 @@ import { fromSecp256k1 } from '@filoz/synapse-core/session-key'
 import { addPieces, createDataSet, waitForAddPieces, waitForCreateDataSet } from '@filoz/synapse-core/sp'
 import { getDataSet } from '@filoz/synapse-core/warm-storage'
 import { execa } from 'execa'
+import pMap from 'p-map'
 import { createPublicClient, http } from 'viem'
 import { getAddress } from 'viem/utils'
 import { z } from 'zod'
@@ -20,6 +21,7 @@ import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const PARKING_BATCH_SIZE = 50
 const COMMIT_BATCH_SIZE = 20
+const PARKING_RECOVERY_BATCH_SIZE = 1_000
 const DEFAULT_COMMIT_CONCURRENCY = 4
 const EMPTY_POLL_INTERVAL_MS = 1_000
 
@@ -168,30 +170,56 @@ const parkingResultSchema = z
   })
 
 /**
+ * Curio may emit log lines before the final JSON result.
+ *
+ * @param {string} stdout
+ */
+function extractParkingJson(stdout) {
+  const trimmed = stdout.trim()
+  if (!trimmed) {
+    throw new Error('commit: parking command returned empty stdout')
+  }
+
+  const objectStart = trimmed.lastIndexOf('\n{')
+  const start = objectStart >= 0 ? objectStart + 1 : trimmed.indexOf('{')
+  if (start < 0) {
+    throw new Error('commit: parking command returned no JSON result in stdout')
+  }
+
+  return trimmed.slice(start)
+}
+
+/**
  * @param {string} dir
  * @param {string} target
  * @returns {Promise<ParkingResult>}
  */
 async function runParkingBinary(dir, target) {
-  const result = await execa({
-    env: {
-      LANG: 'en_US.UTF-8',
-    },
-  })('curio', [
-    'toolbox',
-    'import-pieces',
-    '--source',
-    shardsDir(dir),
-    '--target',
-    target,
-    '--batch-size',
-    String(PARKING_BATCH_SIZE),
-  ])
+  let result
+  try {
+    result = await execa({
+      env: {
+        LANG: 'en_US.UTF-8',
+        GOLOG_LOG_LEVEL: 'error',
+      },
+    })('curio', [
+      'toolbox',
+      'import-pieces',
+      '--source',
+      shardsDir(dir),
+      '--target',
+      target,
+      '--batch-size',
+      String(PARKING_BATCH_SIZE),
+    ])
+  } catch (err) {
+    const message = err?.stderr || err?.stdout || err?.message || String(err)
+    throw new Error(`commit: parking command failed: ${message}`)
+  }
 
   let parsed
   try {
-    console.log(`Parking binary output: ${result.stdout}`)
-    parsed = JSON.parse(result.stdout || '{}')
+    parsed = JSON.parse(extractParkingJson(result.stdout || ''))
   } catch (err) {
     throw new Error(`commit: parking command returned invalid JSON: ${err?.message || err}`)
   }
@@ -207,6 +235,63 @@ function buildCommitPieces(rows) {
     pieceCid: parsePieceCid(row.pieceCid),
     metadata: { ipfsRootCID: row.rootCid },
   }))
+}
+
+/**
+ * @param {string} serviceUrl
+ * @param {string} pieceCid
+ */
+async function isPieceAvailable(serviceUrl, pieceCid) {
+  const baseUrl = serviceUrl.endsWith('/') ? serviceUrl : `${serviceUrl}/`
+  const url = new URL(`piece/${pieceCid}`, baseUrl)
+  const response = await fetch(url, { method: 'HEAD' })
+
+  if (response.status === 200) return true
+  if (response.status === 404) return false
+  if (!response.ok) {
+    throw new Error(`commit: parking recovery HEAD ${url.toString()} returned ${response.status}`)
+  }
+
+  return true
+}
+
+/**
+ * Last-resort recovery for the crash window where Curio already parked files
+ * but the DB was not updated before the process failed.
+ *
+ * @param {object} args
+ * @param {TrackingDb} args.tracking
+ * @param {string} args.serviceUrl
+ * @param {number} args.concurrency
+ */
+async function recoverParkedPieces({ tracking, serviceUrl, concurrency }) {
+  let afterPieceCid = ''
+  let recoveredCount = 0
+
+  while (true) {
+    const pendingPieceCids = tracking.listPendingCommitPieceCids(PARKING_RECOVERY_BATCH_SIZE, afterPieceCid)
+    if (pendingPieceCids.length === 0) return recoveredCount
+
+    const recovered = await pMap(
+      pendingPieceCids,
+      async (pieceCid) => {
+        try {
+          return (await isPieceAvailable(serviceUrl, pieceCid)) ? pieceCid : null
+        } catch (err) {
+          const message = `parking recovery probe failed: ${err?.message || err}`
+          console.error(`commit: ${message} for piece ${pieceCid}`)
+          tracking.markPendingCommitPieceError(pieceCid, message)
+          return null
+        }
+      },
+      { concurrency },
+    )
+
+    const recoveredPieceCids = recovered.filter((pieceCid) => pieceCid != null)
+    tracking.markParkedByPieceCids(recoveredPieceCids)
+    recoveredCount += recoveredPieceCids.length
+    afterPieceCid = pendingPieceCids[pendingPieceCids.length - 1]
+  }
 }
 
 /**
@@ -291,7 +376,18 @@ export async function runCommit({
       try {
         while (true) {
           const parkingResult = await runParkingBinary(dir, target)
-          if (parkingResult.count === 0) return
+          if (parkingResult.count === 0) {
+            const recovered = await recoverParkedPieces({
+              tracking,
+              serviceUrl,
+              concurrency: commitConcurrency,
+            })
+            if (recovered === 0) return
+
+            renderCommitProgress(tracking.getCommitStats())
+            continue
+          }
+
           tracking.markParkedByPieceCids(parkingResult.pieces)
           renderCommitProgress(tracking.getCommitStats())
         }

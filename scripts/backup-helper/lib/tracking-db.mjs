@@ -354,9 +354,28 @@ export function openTrackingDb(dir) {
   const markParkedByPieceCidStmt = db.prepare(`
     UPDATE root_shards
     SET commit_status = '${COMMIT_STATUS.parked}',
+        last_commit_error = NULL,
         updated_at = ?
     WHERE piece_cid = ?
       AND commit_status = '${COMMIT_STATUS.pending}'
+  `)
+
+  const markPendingCommitPieceErrorStmt = db.prepare(`
+    UPDATE root_shards
+    SET last_commit_error = ?,
+        updated_at = ?
+    WHERE piece_cid = ?
+      AND commit_status = '${COMMIT_STATUS.pending}'
+  `)
+
+  const pendingCommitPieceCidsStmt = db.prepare(`
+    SELECT DISTINCT piece_cid
+    FROM root_shards
+    WHERE commit_status = '${COMMIT_STATUS.pending}'
+      AND piece_cid IS NOT NULL
+      AND piece_cid > ?
+    ORDER BY piece_cid
+    LIMIT ?
   `)
 
   const claimCommitCandidatesStmt = db.prepare(`
@@ -775,6 +794,23 @@ export function openTrackingDb(dir) {
         throw err
       }
       return changed
+    },
+
+    /**
+     * @param {string} pieceCid
+     * @param {string} error
+     */
+    markPendingCommitPieceError(pieceCid, error) {
+      return Number(markPendingCommitPieceErrorStmt.run(error, now(), pieceCid).changes || 0)
+    },
+
+    /**
+     * @param {number} limit
+     * @param {string} afterPieceCid
+     * @returns {string[]}
+     */
+    listPendingCommitPieceCids(limit, afterPieceCid = '') {
+      return pendingCommitPieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid?.toString())
     },
 
     /**

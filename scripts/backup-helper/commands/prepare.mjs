@@ -7,10 +7,10 @@
  * CAR bytes and persisted back into tracking.db.
  */
 
-import { createReadStream } from 'node:fs'
 import fs from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { Worker } from 'node:worker_threads'
 
-import { calculateFromIterable } from '@filoz/synapse-core/piece'
 import pMap from 'p-map'
 
 import { pathExists, renderProgressLine } from '../../utils.js'
@@ -28,15 +28,83 @@ const PREPARE_BATCH_SIZE = 1_000
  */
 
 /**
- * @param {string} carPath
+ * Pool of worker threads that each compute a piece CID from a CAR file, so the
+ * CPU-bound (pure-JS, single-threaded) CommP hashing runs in parallel across
+ * cores. Each worker calls the same `@filoz/synapse-core/piece` hash as before,
+ * so output piece CIDs are identical — only throughput changes. DB writes and
+ * file renames stay on the main thread (sqlite is not shared with workers).
  */
-async function calculateLocalPieceCid(carPath) {
-  const stream = createReadStream(carPath)
-  try {
-    const pieceCid = await calculateFromIterable(stream)
-    return pieceCid.toString()
-  } finally {
-    stream.destroy()
+class PieceCidWorkerPool {
+  /** @param {number} size */
+  constructor(size) {
+    this.workerPath = fileURLToPath(new URL('../lib/piece-cid-worker.mjs', import.meta.url))
+    /** @type {import('node:worker_threads').Worker[]} */
+    this.workers = []
+    /** @type {import('node:worker_threads').Worker[]} */
+    this.idle = []
+    /** @type {Array<{carPath: string, resolve: (v: string) => void, reject: (e: Error) => void}>} */
+    this.queue = []
+    /** @type {Map<import('node:worker_threads').Worker, {resolve: (v: string) => void, reject: (e: Error) => void}>} */
+    this.busy = new Map()
+    for (let i = 0; i < Math.max(1, size); i++) {
+      const worker = new Worker(this.workerPath)
+      worker.on('message', (msg) => this._onMessage(worker, msg))
+      worker.on('error', (err) => this._onError(worker, err))
+      this.workers.push(worker)
+      this.idle.push(worker)
+    }
+  }
+
+  /**
+   * @param {string} carPath
+   * @returns {Promise<string>}
+   */
+  compute(carPath) {
+    return new Promise((resolve, reject) => {
+      const worker = this.idle.pop()
+      if (worker) this._assign(worker, { carPath, resolve, reject })
+      else this.queue.push({ carPath, resolve, reject })
+    })
+  }
+
+  /**
+   * @param {import('node:worker_threads').Worker} worker
+   * @param {{carPath: string, resolve: (v: string) => void, reject: (e: Error) => void}} job
+   */
+  _assign(worker, job) {
+    this.busy.set(worker, { resolve: job.resolve, reject: job.reject })
+    worker.postMessage({ carPath: job.carPath })
+  }
+
+  /**
+   * @param {import('node:worker_threads').Worker} worker
+   * @param {{pieceCid?: string, error?: string}} msg
+   */
+  _onMessage(worker, msg) {
+    const job = this.busy.get(worker)
+    this.busy.delete(worker)
+    if (job) {
+      if (msg.error) job.reject(new Error(msg.error))
+      else job.resolve(/** @type {string} */ (msg.pieceCid))
+    }
+    const next = this.queue.shift()
+    if (next) this._assign(worker, next)
+    else this.idle.push(worker)
+  }
+
+  /**
+   * @param {import('node:worker_threads').Worker} worker
+   * @param {Error} err
+   */
+  _onError(worker, err) {
+    const job = this.busy.get(worker)
+    this.busy.delete(worker)
+    if (job) job.reject(err)
+    // a crashed worker leaves the pool; remaining workers continue
+  }
+
+  async close() {
+    await Promise.all(this.workers.map((worker) => worker.terminate()))
   }
 }
 
@@ -127,6 +195,7 @@ function renderPrepareProgress(summary) {
 export async function runPrepare({ dir, concurrency }) {
   const tracking = openTrackingDb(dir)
   const workerConcurrency = concurrency ?? DEFAULT_PREPARE_CONCURRENCY
+  const pool = new PieceCidWorkerPool(workerConcurrency)
 
   try {
     const total = tracking.getDownloadStats().complete
@@ -171,7 +240,7 @@ export async function runPrepare({ dir, concurrency }) {
 
             let pieceCid = candidate.pieceCid
             if (!pieceCid) {
-              pieceCid = await calculateLocalPieceCid(workItem.carPath)
+              pieceCid = await pool.compute(workItem.carPath)
               tracking.setPieceCid(workItem.shardCid, pieceCid)
               computedPieceCid = true
             } else {
@@ -209,6 +278,7 @@ export async function runPrepare({ dir, concurrency }) {
       `prepare: done. total=${summary.total} done=${summary.done}/${summary.total} computed=${summary.computed} failed=${summary.failed}`,
     )
   } finally {
+    await pool.close()
     tracking.close()
   }
 }

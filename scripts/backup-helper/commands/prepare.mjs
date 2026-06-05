@@ -183,11 +183,13 @@ export async function runPrepare({ dir, concurrency }) {
             return { computedPieceCid, failed: false }
           } catch (err) {
             const shardCid = workItem?.shardCid || candidate.shardCid
+            const error = String(err?.message || err)
             tracking.markPrepareFailure({
               shardCid,
-              error: String(err?.message || err),
+              error,
               retryable: false,
             })
+            console.error(`prepare: failure shard=${shardCid} error=${error}`)
             return { computedPieceCid: false, failed: true }
           }
         },

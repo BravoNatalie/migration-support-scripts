@@ -5,6 +5,9 @@
  * provider machine and returns ready-to-commit `pieceCid`s.
  */
 
+import fs from 'node:fs/promises'
+import path from 'node:path'
+
 import { parse as parsePieceCid } from '@filoz/synapse-core/piece'
 import { fromSecp256k1 } from '@filoz/synapse-core/session-key'
 import { addPieces, createDataSet, waitForAddPieces, waitForCreateDataSet } from '@filoz/synapse-core/sp'
@@ -16,7 +19,7 @@ import { getAddress } from 'viem/utils'
 import { z } from 'zod'
 
 import { renderProgressLine } from '../../utils.js'
-import { shardsDir } from '../lib/layout.mjs'
+import { parkingResultsDir, shardsDir } from '../lib/layout.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const PARKING_BATCH_SIZE = 50
@@ -155,6 +158,7 @@ function renderCommitProgress(summary) {
  * @typedef {object} ParkingResult
  * @property {number} count
  * @property {string[]} pieces
+ * @property {string | null} error
  */
 
 const parkingResultSchema = z
@@ -164,29 +168,18 @@ const parkingResultSchema = z
       .array(z.string())
       .nullable()
       .transform((pieces) => pieces ?? []),
+    error: z
+      .string()
+      .nullable()
+      .optional()
+      .transform((error) => error ?? null),
   })
   .refine((value) => value.count === value.pieces.length, {
     message: 'count must match pieces length',
   })
 
-/**
- * Curio may emit log lines before the final JSON result.
- *
- * @param {string} stdout
- */
-function extractParkingJson(stdout) {
-  const trimmed = stdout.trim()
-  if (!trimmed) {
-    throw new Error('commit: parking command returned empty stdout')
-  }
-
-  const objectStart = trimmed.lastIndexOf('\n{')
-  const start = objectStart >= 0 ? objectStart + 1 : trimmed.indexOf('{')
-  if (start < 0) {
-    throw new Error('commit: parking command returned no JSON result in stdout')
-  }
-
-  return trimmed.slice(start)
+function formatParkingResultTimestamp() {
+  return new Date().toISOString().replaceAll(':', '-')
 }
 
 /**
@@ -195,9 +188,14 @@ function extractParkingJson(stdout) {
  * @returns {Promise<ParkingResult>}
  */
 async function runParkingBinary(dir, target) {
-  let result
+  const resultsDir = parkingResultsDir(dir)
+  await fs.mkdir(resultsDir, { recursive: true })
+
+  const resultPath = path.join(resultsDir, `parking-result-${formatParkingResultTimestamp()}.json`)
+  /** @type {string | null} */
+  let commandError = null
   try {
-    result = await execa({
+    await execa({
       env: {
         LANG: 'en_US.UTF-8',
         GOLOG_LOG_LEVEL: 'error',
@@ -209,22 +207,34 @@ async function runParkingBinary(dir, target) {
       shardsDir(dir),
       '--target',
       target,
+      '--result',
+      resultPath,
       '--batch-size',
       String(PARKING_BATCH_SIZE),
     ])
   } catch (err) {
-    const message = err?.stderr || err?.stdout || err?.message || String(err)
-    throw new Error(`commit: parking command failed: ${message}`)
+    commandError = err?.stderr || err?.stdout || err?.message || String(err)
   }
 
   let parsed
   try {
-    parsed = JSON.parse(extractParkingJson(result.stdout || ''))
+    const content = await fs.readFile(resultPath, 'utf8')
+    parsed = JSON.parse(content)
   } catch (err) {
-    throw new Error(`commit: parking command returned invalid JSON: ${err?.message || err}`)
+    throw new Error(`commit: parking command returned invalid result file: ${err?.message || err}`)
   }
 
-  return /** @type {ParkingResult} */ (parkingResultSchema.parse(parsed))
+  const parkingResult = /** @type {ParkingResult} */ (parkingResultSchema.parse(parsed))
+  await fs.rm(resultPath, { force: true })
+
+  if (commandError && !parkingResult.error) {
+    return {
+      ...parkingResult,
+      error: commandError,
+    }
+  }
+
+  return parkingResult
 }
 
 /**
@@ -376,6 +386,15 @@ export async function runCommit({
       try {
         while (true) {
           const parkingResult = await runParkingBinary(dir, target)
+          if (parkingResult.pieces.length > 0) {
+            tracking.markParkedByPieceCids(parkingResult.pieces)
+            renderCommitProgress(tracking.getCommitStats())
+          }
+
+          if (parkingResult.error) {
+            console.error(`commit: parking batch error: ${parkingResult.error}`)
+          }
+
           if (parkingResult.count === 0) {
             const recovered = await recoverParkedPieces({
               tracking,
@@ -385,11 +404,7 @@ export async function runCommit({
             if (recovered === 0) return
 
             renderCommitProgress(tracking.getCommitStats())
-            continue
           }
-
-          tracking.markParkedByPieceCids(parkingResult.pieces)
-          renderCommitProgress(tracking.getCommitStats())
         }
       } finally {
         parkingSettled = true

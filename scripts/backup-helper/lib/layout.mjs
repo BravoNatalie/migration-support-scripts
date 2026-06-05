@@ -18,6 +18,9 @@ export const trackingDbPath = (dir) => path.join(dir, 'tracking.db')
 /** @param {string} dir */
 export const shardsDir = (dir) => path.join(dir, 'shards')
 
+/** @param {string} dir */
+export const parkingResultsDir = (dir) => path.join(dir, 'parking-results')
+
 /**
  * @param {string} dir
  * @param {string} shardCid

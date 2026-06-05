@@ -46,10 +46,16 @@ class PieceCidWorkerPool {
     this.queue = []
     /** @type {Map<import('node:worker_threads').Worker, {resolve: (v: string) => void, reject: (e: Error) => void}>} */
     this.busy = new Map()
+    /** @type {Error | null} */
+    this.fatalError = null
+    this.closing = false
+    /** @type {Set<import('node:worker_threads').Worker>} */
+    this.failedWorkers = new Set()
     for (let i = 0; i < Math.max(1, size); i++) {
       const worker = new Worker(this.workerPath)
       worker.on('message', (msg) => this._onMessage(worker, msg))
       worker.on('error', (err) => this._onError(worker, err))
+      worker.on('exit', (code) => this._onExit(worker, code))
       this.workers.push(worker)
       this.idle.push(worker)
     }
@@ -61,6 +67,11 @@ class PieceCidWorkerPool {
    */
   compute(carPath) {
     return new Promise((resolve, reject) => {
+      if (this.fatalError) {
+        reject(this.fatalError)
+        return
+      }
+
       const worker = this.idle.pop()
       if (worker) this._assign(worker, { carPath, resolve, reject })
       else this.queue.push({ carPath, resolve, reject })
@@ -97,13 +108,73 @@ class PieceCidWorkerPool {
    * @param {Error} err
    */
   _onError(worker, err) {
+    this._handleWorkerFailure(worker, err, `prepare: piece CID worker error: ${err?.message || err}`)
+  }
+
+  /**
+   * @param {import('node:worker_threads').Worker} worker
+   * @param {number} code
+   */
+  _onExit(worker, code) {
+    if (this.closing) return
+    if (code !== 0) {
+      const err = new Error(`piece CID worker exited with code ${code}`)
+      this._handleWorkerFailure(worker, err, `prepare: ${err.message}`)
+      return
+    }
+
+    if (this.busy.has(worker)) {
+      const err = new Error('piece CID worker exited unexpectedly while processing a job')
+      this._handleWorkerFailure(worker, err, `prepare: ${err.message}`)
+    }
+  }
+
+  /**
+   * @param {import('node:worker_threads').Worker} worker
+   */
+  _removeWorker(worker) {
+    this.workers = this.workers.filter((candidate) => candidate !== worker)
+    this.idle = this.idle.filter((candidate) => candidate !== worker)
+  }
+
+  /**
+   * @param {import('node:worker_threads').Worker} worker
+   * @param {Error} err
+   * @param {string} logMessage
+   */
+  _handleWorkerFailure(worker, err, logMessage) {
+    if (this.failedWorkers.has(worker)) return
+    this.failedWorkers.add(worker)
+
     const job = this.busy.get(worker)
     this.busy.delete(worker)
     if (job) job.reject(err)
-    // a crashed worker leaves the pool; remaining workers continue
+    this._removeWorker(worker)
+    console.error(logMessage)
+    this._drainOrFailQueue()
+  }
+
+  _drainOrFailQueue() {
+    while (this.idle.length > 0 && this.queue.length > 0) {
+      const worker = this.idle.pop()
+      const next = this.queue.shift()
+      if (!worker || !next) break
+      this._assign(worker, next)
+    }
+
+    if (this.workers.length > 0) return
+
+    this.fatalError = new Error('all piece CID workers failed')
+    console.error(`prepare: ${this.fatalError.message}`)
+    while (this.queue.length > 0) {
+      const next = this.queue.shift()
+      if (!next) break
+      next.reject(this.fatalError)
+    }
   }
 
   async close() {
+    this.closing = true
     await Promise.all(this.workers.map((worker) => worker.terminate()))
   }
 }
@@ -195,7 +266,8 @@ function renderPrepareProgress(summary) {
 export async function runPrepare({ dir, concurrency }) {
   const tracking = openTrackingDb(dir)
   const workerConcurrency = concurrency ?? DEFAULT_PREPARE_CONCURRENCY
-  const pool = new PieceCidWorkerPool(workerConcurrency)
+  /** @type {PieceCidWorkerPool | null} */
+  let pool = null
 
   try {
     const total = tracking.getDownloadStats().complete
@@ -203,6 +275,8 @@ export async function runPrepare({ dir, concurrency }) {
       console.error('prepare: nothing to do')
       return
     }
+
+    pool = new PieceCidWorkerPool(workerConcurrency)
 
     const summary = {
       total,
@@ -240,6 +314,7 @@ export async function runPrepare({ dir, concurrency }) {
 
             let pieceCid = candidate.pieceCid
             if (!pieceCid) {
+              if (!pool) throw new Error('prepare: piece CID worker pool was not initialized')
               pieceCid = await pool.compute(workItem.carPath)
               tracking.setPieceCid(workItem.shardCid, pieceCid)
               computedPieceCid = true
@@ -280,7 +355,7 @@ export async function runPrepare({ dir, concurrency }) {
       `prepare: done. total=${summary.total} done=${summary.done}/${summary.total} computed=${summary.computed} failed=${summary.failed}`,
     )
   } finally {
-    await pool.close()
+    if (pool) await pool.close()
     tracking.close()
   }
 }

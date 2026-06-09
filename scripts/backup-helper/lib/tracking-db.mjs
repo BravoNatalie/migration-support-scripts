@@ -378,6 +378,25 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
+  const committedPieceCidsStmt = db.prepare(`
+    SELECT DISTINCT piece_cid
+    FROM root_shards
+    WHERE commit_status = '${COMMIT_STATUS.committed}'
+      AND piece_cid IS NOT NULL
+      AND piece_cid > ?
+    ORDER BY piece_cid
+    LIMIT ?
+  `)
+
+  const committedRootCidsStmt = db.prepare(`
+    SELECT DISTINCT root_cid
+    FROM root_shards
+    WHERE commit_status = '${COMMIT_STATUS.committed}'
+      AND root_cid > ?
+    ORDER BY root_cid
+    LIMIT ?
+  `)
+
   const claimCommitCandidatesStmt = db.prepare(`
     SELECT root_cid, shard_cid, piece_cid
     FROM root_shards
@@ -574,6 +593,28 @@ export function openTrackingDb(dir) {
         })
       }
       return candidates
+    },
+
+    /**
+     * List one stable keyset-paginated batch of distinct committed piece CIDs.
+     *
+     * @param {number} limit
+     * @param {string} afterPieceCid
+     * @returns {string[]}
+     */
+    listCommittedPieceCids(limit, afterPieceCid) {
+      return committedPieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid.toString())
+    },
+
+    /**
+     * List one stable keyset-paginated batch of distinct committed root CIDs.
+     *
+     * @param {number} limit
+     * @param {string} afterRootCid
+     * @returns {string[]}
+     */
+    listCommittedRootCids(limit, afterRootCid) {
+      return committedRootCidsStmt.all(afterRootCid, limit).map((row) => row.root_cid.toString())
     },
 
     /**

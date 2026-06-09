@@ -29,6 +29,9 @@ importers:
       p-map:
         specifier: ^7.0.4
         version: 7.0.4
+      p-retry:
+        specifier: ^8.0.0
+        version: 8.0.0
       viem:
         specifier: ^2.50.3
         version: 2.50.3(zod@4.4.3)

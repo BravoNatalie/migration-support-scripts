@@ -24,8 +24,18 @@ export function openInventoryDb(dbPath) {
   const db = new DatabaseSync(dbPath, { readOnly: true })
 
   const stmt = db.prepare('SELECT shard_cid, root_cid, source_url, size_bytes, piece_cid FROM shards')
+  const countDistinctShardsStmt = db.prepare('SELECT COUNT(DISTINCT shard_cid) AS n FROM shards')
+  const countDistinctRootsStmt = db.prepare('SELECT COUNT(DISTINCT root_cid) AS n FROM shards')
 
   return {
+    countDistinctShards() {
+      return Number(countDistinctShardsStmt.get().n || 0)
+    },
+
+    countDistinctRoots() {
+      return Number(countDistinctRootsStmt.get().n || 0)
+    },
+
     /**
      * Yields every shards row in PK order. Caller dedupes.
      *

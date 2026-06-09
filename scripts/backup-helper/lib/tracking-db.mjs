@@ -213,6 +213,7 @@ export function openTrackingDb(dir) {
   `)
 
   const countShardsStmt = db.prepare('SELECT COUNT(*) AS n FROM shards')
+  const countDistinctRootsStmt = db.prepare('SELECT COUNT(DISTINCT root_cid) AS n FROM root_shards')
 
   const iterForManifestStmt = db.prepare(`
     SELECT shard_cid, source_url FROM shards ORDER BY shard_cid
@@ -510,6 +511,11 @@ export function openTrackingDb(dir) {
     /** Total unique shards in tracking.db. */
     countShards() {
       return Number(countShardsStmt.get().n)
+    },
+
+    /** Total distinct roots in tracking.db. */
+    countDistinctRoots() {
+      return Number(countDistinctRootsStmt.get().n)
     },
 
     /**

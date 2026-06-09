@@ -11,7 +11,7 @@
  *   prepare   --dir <output-dir> [--concurrency N]
  *   commit    --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x...
  *             [--network mainnet|calibration] [--concurrency N] [--retry]
- *   verify    --dir <output-dir> [--network mainnet|calibration] [--concurrency N]
+ *   verify    --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N]
  */
 
 import fs from 'node:fs'
@@ -32,7 +32,7 @@ function usage() {
   backup-helper download --dir <output-dir> [--concurrency N] [--port N]
   backup-helper prepare  --dir <output-dir> [--concurrency N]
   backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
-  backup-helper verify   --dir <output-dir> [--network mainnet|calibration] [--concurrency N]`)
+  backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N]`)
 }
 
 /**
@@ -295,6 +295,7 @@ async function verify(argv) {
     ;({ values } = parseArgs({
       args: argv,
       options: {
+        db: { type: 'string' },
         dir: { type: 'string' },
         network: { type: 'string' },
         concurrency: { type: 'string' },
@@ -308,6 +309,7 @@ async function verify(argv) {
   }
 
   await runVerify({
+    db: requireDb(values.db, 'verify'),
     dir: requireDir(values.dir, 'verify'),
     chain: parseCommitNetwork(values.network),
     concurrency: parseConcurrency(values.concurrency, 'verify'),

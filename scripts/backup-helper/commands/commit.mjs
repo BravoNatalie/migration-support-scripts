@@ -27,6 +27,14 @@ const COMMIT_BATCH_SIZE = 20
 const PARKING_RECOVERY_BATCH_SIZE = 1_000
 const DEFAULT_COMMIT_CONCURRENCY = 4
 const EMPTY_POLL_INTERVAL_MS = 1_000
+// On-chain confirmation lag runs 10-20 min under load; synapse-core's default
+// waitForAddPieces budget is 5 min, which times out every batch and marks
+// rows failed even though the tx lands. Wait long enough to outlive the lag.
+const WAIT_ADD_PIECES_TIMEOUT_MS = 60 * 60 * 1_000
+// Stagger worker launch: N workers firing addPieces in the same second drive N
+// simultaneous gas estimations into lotus, which times out and 500s most of the
+// batch (observed: 63/64 failed at launch with concurrency 64).
+const WORKER_START_STAGGER_MS = 750
 
 /**
  * @typedef {object} CommitRow
@@ -248,6 +256,30 @@ function buildCommitPieces(rows) {
 }
 
 /**
+ * Fetch the set of piece CIDs already in the data set, so the commit lane can
+ * skip pieces that landed on-chain in a previous run (e.g. after a client-side
+ * waitForAddPieces timeout marked the batch failed even though the tx confirmed).
+ *
+ * @param {string} serviceUrl
+ * @param {number} dataSetId
+ * @returns {Promise<Set<string>>}
+ */
+async function fetchDataSetPieceCids(serviceUrl, dataSetId) {
+  const baseUrl = serviceUrl.endsWith('/') ? serviceUrl : `${serviceUrl}/`
+  const url = new URL(`pdp/data-sets/${dataSetId}`, baseUrl)
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`commit: dedupe guard GET ${url.toString()} returned ${response.status}`)
+  }
+  const data = await response.json()
+  const cids = new Set()
+  for (const piece of data.pieces ?? []) {
+    if (piece?.pieceCid) cids.add(String(piece.pieceCid).toLowerCase())
+  }
+  return cids
+}
+
+/**
  * @param {string} serviceUrl
  * @param {string} pieceCid
  */
@@ -321,7 +353,7 @@ async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId,
       clientDataSetId,
       pieces: buildCommitPieces(rows),
     })
-    const addStatus = await waitForAddPieces({ statusUrl: addResult.statusUrl })
+    const addStatus = await waitForAddPieces({ statusUrl: addResult.statusUrl, timeout: WAIT_ADD_PIECES_TIMEOUT_MS })
 
     tracking.markCommitBatchSucceeded(rows, addStatus.txHash.toString())
 
@@ -382,6 +414,10 @@ export async function runCommit({
       publicClient,
     })
 
+    console.log(`loading on-chain piece list for dedupe guard...`)
+    const onChainPieceCids = await fetchDataSetPieceCids(serviceUrl, ensuredDataSet.dataSetId)
+    console.log(`dedupe guard: ${onChainPieceCids.size} pieces already on-chain`)
+
     const parkingLane = (async () => {
       try {
         while (true) {
@@ -414,7 +450,8 @@ export async function runCommit({
       throw err
     })
 
-    const commitWorker = async () => {
+    const commitWorker = async (workerIndex) => {
+      await sleep(workerIndex * WORKER_START_STAGGER_MS)
       while (true) {
         const rows = tracking.claimCommitBatch(COMMIT_BATCH_SIZE)
         if (rows.length === 0) {
@@ -423,20 +460,34 @@ export async function runCommit({
           continue
         }
 
-        await commitBatch({
+        // Dedupe guard: a piece already in the data set (e.g. from a batch that
+        // timed out client-side but landed on-chain) must not be re-added --
+        // re-adding mints a duplicate on-chain entry. Mark it succeeded instead.
+        const alreadyOnChain = rows.filter((row) => onChainPieceCids.has(row.pieceCid.toLowerCase()))
+        if (alreadyOnChain.length > 0) {
+          tracking.markCommitBatchSucceeded(alreadyOnChain, 'already-on-chain')
+          renderCommitProgress(tracking.getCommitStats())
+        }
+        const toCommit = rows.filter((row) => !onChainPieceCids.has(row.pieceCid.toLowerCase()))
+        if (toCommit.length === 0) continue
+
+        const batchResult = await commitBatch({
           sessionKey: session,
           serviceUrl,
           dataSetId: ensuredDataSet.dataSetId,
           clientDataSetId: ensuredDataSet.clientDataSetId,
           tracking,
-          rows,
+          rows: toCommit,
         })
+        if (batchResult.success) {
+          for (const row of toCommit) onChainPieceCids.add(row.pieceCid.toLowerCase())
+        }
         renderCommitProgress(tracking.getCommitStats())
       }
     }
 
     const commitLane = (async () => {
-      const workers = Array.from({ length: commitConcurrency }, () => commitWorker())
+      const workers = Array.from({ length: commitConcurrency }, (_, workerIndex) => commitWorker(workerIndex))
       const workerResults = await Promise.allSettled(workers)
       let rejectedWorker = null
 

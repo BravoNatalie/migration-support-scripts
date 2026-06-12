@@ -116,6 +116,12 @@ export async function runRemovePieces({
       for (const pieceId of batch) {
         appendFileSync(logFile, JSON.stringify({ pieceId, ok: false, error, at: Date.now() }) + '\n')
       }
+      if (error.includes('Too many removals')) {
+        console.log(
+          `remove-pieces: proving-period removal cap reached after ${scheduled} this run - rerun after the next proving period to continue`,
+        )
+        return
+      }
       throw new Error(`remove-pieces: batch starting at piece ${batch[0]} failed: ${error}`)
     }
     await sleep(delayMs)

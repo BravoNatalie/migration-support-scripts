@@ -20,6 +20,8 @@ import { parseArgs } from 'node:util'
 import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import { isAddress } from 'viem/utils'
 import { runCommit } from './commands/commit.mjs'
+import { runRemovePieces } from './commands/remove-pieces.mjs'
+import { runReportDuplicates } from './commands/report-duplicates.mjs'
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
 import { runPrepare } from './commands/prepare.mjs'
@@ -246,6 +248,7 @@ async function commit(argv) {
         network: { type: 'string' },
         concurrency: { type: 'string' },
         retry: { type: 'boolean' },
+        'dry-run': { type: 'boolean' },
       },
       allowPositionals: false,
       strict: true,
@@ -280,6 +283,81 @@ async function commit(argv) {
     target: requireDir(values.target, 'commit'),
     concurrency: parseConcurrency(values.concurrency, 'commit'),
     retry: values.retry === true,
+    dryRun: values['dry-run'] === true,
+  })
+}
+
+async function removePieces(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        dir: { type: 'string' },
+        'service-url': { type: 'string' },
+        'session-key': { type: 'string' },
+        'customer-wallet': { type: 'string' },
+        network: { type: 'string' },
+        'ids-file': { type: 'string' },
+        limit: { type: 'string' },
+        'delay-ms': { type: 'string' },
+        'batch-size': { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  const sessionKey = values['session-key']
+  if (!sessionKey || !/^0x[0-9a-fA-F]{64}$/.test(sessionKey)) {
+    console.error('remove-pieces: --session-key must be a 32-byte hex private key')
+    process.exit(1)
+  }
+  if (!values['ids-file']) {
+    console.error('Error: remove-pieces: missing required --ids-file <path> argument')
+    process.exit(1)
+  }
+
+  await runRemovePieces({
+    dir: requireDir(values.dir, 'remove-pieces'),
+    serviceUrl: requireServiceUrl(values['service-url']),
+    customerWallet: parseAddress(values['customer-wallet'], '--customer-wallet'),
+    sessionKey,
+    chain: parseCommitNetwork(values.network),
+    idsFile: values['ids-file'],
+    limit: values.limit != null ? Number(values.limit) : undefined,
+    delayMs: values['delay-ms'] != null ? Number(values['delay-ms']) : undefined,
+    batchSize: values['batch-size'] != null ? Number(values['batch-size']) : undefined,
+  })
+}
+
+async function reportDuplicates(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        dir: { type: 'string' },
+        'service-url': { type: 'string' },
+        network: { type: 'string' },
+        out: { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  await runReportDuplicates({
+    dir: requireDir(values.dir, 'report-duplicates'),
+    serviceUrl: requireServiceUrl(values['service-url']),
+    chain: parseCommitNetwork(values.network),
+    outFile: values.out,
   })
 }
 
@@ -298,6 +376,12 @@ async function main() {
       break
     case 'commit':
       await commit(rest)
+      break
+    case 'report-duplicates':
+      await reportDuplicates(rest)
+      break
+    case 'remove-pieces':
+      await removePieces(rest)
       break
     default:
       usage()

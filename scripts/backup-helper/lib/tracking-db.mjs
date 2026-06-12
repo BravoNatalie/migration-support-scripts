@@ -351,6 +351,30 @@ export function openTrackingDb(dir) {
     WHERE commit_status IN ('${COMMIT_STATUS.failed}', '${COMMIT_STATUS.committing}')
   `)
 
+  const unresolvedCommitPieceCidsStmt = db.prepare(`
+    SELECT DISTINCT piece_cid
+    FROM root_shards
+    WHERE commit_status IN ('${COMMIT_STATUS.failed}', '${COMMIT_STATUS.committing}')
+      AND piece_cid IS NOT NULL
+  `)
+
+  const parkedCommitPieceCidsStmt = db.prepare(`
+    SELECT DISTINCT piece_cid
+    FROM root_shards
+    WHERE commit_status = '${COMMIT_STATUS.parked}'
+      AND piece_cid IS NOT NULL
+  `)
+
+  const reconcileCommittedByPieceCidStmt = db.prepare(`
+    UPDATE root_shards
+    SET commit_status = '${COMMIT_STATUS.committed}',
+        last_commit_error = NULL,
+        tx_hash = COALESCE(tx_hash, ?),
+        updated_at = ?
+    WHERE piece_cid = ?
+      AND commit_status IN ('${COMMIT_STATUS.failed}', '${COMMIT_STATUS.committing}')
+  `)
+
   const markParkedByPieceCidStmt = db.prepare(`
     UPDATE root_shards
     SET commit_status = '${COMMIT_STATUS.parked}',
@@ -773,6 +797,36 @@ export function openTrackingDb(dir) {
 
     resetCommitRowsForRetry() {
       return Number(retryCommitRowsStmt.run(now()).changes || 0)
+    },
+
+    listUnresolvedCommitPieceCids() {
+      return unresolvedCommitPieceCidsStmt.all().map((row) => row.piece_cid?.toString())
+    },
+
+    listParkedCommitPieceCids() {
+      return parkedCommitPieceCidsStmt.all().map((row) => row.piece_cid?.toString())
+    },
+
+    /**
+     * @param {string[]} pieceCids
+     * @param {string} txHash
+     */
+    reconcileCommittedByPieceCids(pieceCids, txHash) {
+      if (pieceCids.length === 0) return 0
+
+      const timestamp = now()
+      let changed = 0
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const pieceCid of pieceCids) {
+          changed += Number(reconcileCommittedByPieceCidStmt.run(txHash, timestamp, pieceCid).changes || 0)
+        }
+        db.exec('COMMIT')
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+      return changed
     },
 
     /**

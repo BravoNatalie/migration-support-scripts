@@ -16,6 +16,9 @@ export const metadataPath = (dir) => path.join(dir, 'metadata.json')
 export const trackingDbPath = (dir) => path.join(dir, 'tracking.db')
 
 /** @param {string} dir */
+export const verifyReportPath = (dir) => path.join(dir, 'verify-report.json')
+
+/** @param {string} dir */
 export const shardsDir = (dir) => path.join(dir, 'shards')
 
 /** @param {string} dir */

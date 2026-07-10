@@ -21,12 +21,12 @@
   "license": "ISC",
   "dependencies": {
     "@filoz/synapse-core": "^0.5.2",
-    "@filoz/synapse-sdk": "^0.41.0",
     "@storacha/client": "^2.1.4",
     "@storacha/filecoin-pin-migration": "^1.1.0",
     "aria2": "^5.0.0",
     "execa": "^9.6.1",
     "p-map": "^7.0.4",
+    "p-retry": "^8.0.0",
     "viem": "^2.50.3",
     "zod": "^4.4.3"
   },

@@ -1,28 +1,27 @@
 {
-  "name": "multi-batch-migration",
+  "name": "storacha-backup-helper",
   "version": "1.0.0",
-  "description": "",
+  "description": "CLI tooling for Storacha backup migration work from a FOC Node",
   "type": "module",
+  "private": true,
+  "bin": {
+    "backup-helper": "./src/index.mjs"
+  },
   "directories": {
     "test": "test"
   },
   "scripts": {
+    "backup-helper": "node src/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "biome:check": "biome check .",
-    "biome:write": "biome check --write .",
-    "format": "biome format --write .",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "backup-helper": "node scripts/backup-helper/index.mjs",
-    "migration-repair": "node scripts/migration-repair/migration-repair.mjs"
+    "biome:check": "biome check README.md package.json pnpm-lock.yaml biome.json tsconfig.json src test/dupfix.test.mjs",
+    "biome:write": "biome check --write README.md package.json pnpm-lock.yaml biome.json tsconfig.json src test/dupfix.test.mjs",
+    "test": "vitest run test/dupfix.test.mjs"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@filoz/synapse-core": "^0.5.2",
-    "@storacha/client": "^2.1.4",
-    "@storacha/filecoin-pin-migration": "^1.1.0",
     "aria2": "^5.0.0",
     "execa": "^9.6.1",
     "p-map": "^7.0.4",
@@ -32,6 +31,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.15",
+    "typescript": "^5.9.3",
     "vitest": "^3.2.4"
   }
 }

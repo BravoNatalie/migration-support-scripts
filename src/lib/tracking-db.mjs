@@ -6,8 +6,8 @@
 
 import { DatabaseSync } from 'node:sqlite'
 
-import { renderProgressLine } from '../../utils.js'
 import { trackingDbPath } from './layout.mjs'
+import { renderProgressLine } from './progress.mjs'
 
 const DOWNLOAD_STATUS = {
   pending: 'pending',

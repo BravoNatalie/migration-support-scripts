@@ -58,24 +58,24 @@ If `--foc-api-url` is provided, missing roots are enriched with indexed on-chain
 
 ```sh
 # 1. Inventory + manifest (fast: minutes for 2M-row input DBs).
-node scripts/backup-helper/index.mjs create \
+node src/index.mjs create \
   --db <space-inventory.db> \
   --dir <output-dir>
 
 # 2. Download CARs (long: hours for terabyte-scale inventories; resumable).
 # Optional: pin aria2 RPC to a specific localhost port
-node scripts/backup-helper/index.mjs download \
+node src/index.mjs download \
   --dir <output-dir> \
   [--port N] \
   [--concurrency N]
 
 # 3. Compute pieceCIDs + rename CARs to pieceCID filenames.
-node scripts/backup-helper/index.mjs prepare \
+node src/index.mjs prepare \
   --dir <output-dir> \
   [--concurrency N]
 
 # 4. Park prepared pieces and commit them on-chain.
-node scripts/backup-helper/index.mjs commit \
+node src/index.mjs commit \
   --dir <output-dir> \
   --target <curio-piece-dir> \
   --service-url https://... \
@@ -87,7 +87,7 @@ node scripts/backup-helper/index.mjs commit \
   [--retry]
 
 # 5. Verify after the migration is finalized and all pieces are committed.
-node scripts/backup-helper/index.mjs verify \
+node src/index.mjs verify \
   --db <space-inventory.db> \
   --dir <output-dir> \
   [--network mainnet|calibration] \

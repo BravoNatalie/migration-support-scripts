@@ -68,12 +68,14 @@ export async function runReportDuplicates({ dir, serviceUrl, chain, outFile }) {
   if (chain && verifierAddress) {
     const client = createPublicClient({ chain, transport: http() })
     chainNextPieceId = Number(
-      await client.readContract({
-        address: verifierAddress,
-        abi: nextPieceIdAbi,
-        functionName: 'getNextPieceId',
-        args: [BigInt(dataSetId)],
-      }),
+      await client.readContract(
+        /** @type {any} */ ({
+          address: verifierAddress,
+          abi: nextPieceIdAbi,
+          functionName: 'getNextPieceId',
+          args: [BigInt(dataSetId)],
+        }),
+      ),
     )
     complete = chainNextPieceId === knownIdCount
     if (!complete) {
@@ -114,7 +116,13 @@ export async function runReportDuplicates({ dir, serviceUrl, chain, outFile }) {
     ),
   )
   const idsTarget = target.replace(/\.json$/, '.txt')
-  writeFileSync(idsTarget, duplicates.flatMap((d) => d.removePieceIds).sort((a, b) => a - b).join('\n') + '\n')
+  writeFileSync(
+    idsTarget,
+    `${duplicates
+      .flatMap((d) => d.removePieceIds)
+      .sort((a, b) => a - b)
+      .join('\n')}\n`,
+  )
   console.log(
     `report-duplicates: data set ${dataSetId}: ${duplicates.length} piece CIDs duplicated, ${removableCount} removable piece ids -> ${target} + ${idsTarget}` +
       (complete === false ? ' (INCOMPLETE - see warning)' : ''),

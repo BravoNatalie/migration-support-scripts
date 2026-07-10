@@ -73,7 +73,7 @@ export async function runCreate({ db, dir }) {
     let count = 0
     try {
       for (const { shardCid, sourceUrl } of tracking.iterateForManifest()) {
-        // Format matches serializeAria2Input from prepare-cars-download:
+        // Keep this compatible with aria2 input files used by earlier tooling:
         //   <sourceURL>
         //    dir=<absolute shards dir>
         //    out=<shardCID>.car

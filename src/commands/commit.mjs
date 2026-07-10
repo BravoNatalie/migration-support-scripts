@@ -18,8 +18,8 @@ import { createPublicClient, http } from 'viem'
 import { getAddress } from 'viem/utils'
 import { z } from 'zod'
 
-import { renderProgressLine } from '../../utils.js'
 import { parkingResultsDir, shardsDir } from '../lib/layout.mjs'
+import { renderProgressLine } from '../lib/progress.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const PARKING_BATCH_SIZE = 50
@@ -83,7 +83,7 @@ async function createSessionKey(sessionKeyStr, customerWallet, chain) {
  * @param {ReturnType<typeof fromSecp256k1>} args.sessionKey
  * @param {string} args.serviceUrl
  * @param {`0x${string}`} args.providerAddress
- * @param {import('viem').PublicClient} args.publicClient
+ * @param {any} args.publicClient
  * @returns {Promise<EnsuredDataSet>}
  */
 async function ensureDataSet({ tracking, sessionKey, serviceUrl, providerAddress, publicClient }) {
@@ -324,10 +324,12 @@ export function makeOnChainPieceCidSet(serviceUrl, dataSetId) {
   }
 }
 
+/** @typedef {ReturnType<typeof makeOnChainPieceCidSet>} OnChainPieceCidSet */
+
 /**
  * @param {object} args
  * @param {TrackingDb} args.tracking
- * @param {ReturnType<typeof makeOnChainPieceCidSet>} args.onChain
+ * @param {OnChainPieceCidSet} args.onChain
  * @param {CommitRow[]} args.rows
  * @param {string} args.error
  * @param {number} [args.polls]
@@ -421,6 +423,7 @@ async function recoverParkedPieces({ tracking, serviceUrl, concurrency }) {
  * @param {number} args.dataSetId
  * @param {bigint} args.clientDataSetId
  * @param {TrackingDb} args.tracking
+ * @param {OnChainPieceCidSet} args.onChain
  * @param {CommitRow[]} args.rows
  */
 async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId, tracking, onChain, rows }) {

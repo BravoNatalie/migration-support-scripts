@@ -14,5 +14,5 @@
 
     "skipLibCheck": true
   },
-  "include": ["scripts/**/*.js", "scripts/**/*.mjs", "test/**/*.js"]
+  "include": ["src/**/*.js", "src/**/*.mjs", "test/**/*.mjs"]
 }

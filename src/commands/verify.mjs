@@ -4,8 +4,9 @@ import pMap from 'p-map'
 import pRetry, { AbortError } from 'p-retry'
 import { createPublicClient, http } from 'viem'
 
-import { renderProgressLine, writeFileAtomic } from '../../utils.js'
+import { writeFileAtomic } from '../lib/files.mjs'
 import { verifyReportPath } from '../lib/layout.mjs'
+import { renderProgressLine } from '../lib/progress.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const VERIFY_ACTIVE_PIECES_PAGE_SIZE = 100n
@@ -283,14 +284,14 @@ function finishProgressLine() {
  * Uses cursor pagination to avoid the high-offset gas cost of
  * PDPVerifier.getActivePieces().
  *
- * @param {import('viem').PublicClient} publicClient
+ * @param {any} publicClient
  * @param {number} dataSetId
  * @returns {Promise<Set<string>>}
  */
 async function listActivePieceCids(publicClient, dataSetId) {
   /** @type {Set<string>} */
   const activePieceCids = new Set()
-  const pdpVerifier = getPdpVerifierContract({ client: publicClient })
+  const pdpVerifier = /** @type {any} */ (getPdpVerifierContract)(/** @type {any} */ ({ client: publicClient }))
   let startPieceId = 0n
   let hasMore = true
 
@@ -509,7 +510,7 @@ async function verifyCommittedRoots(tracking, serviceUrl, concurrency) {
       errored++
       erroredRoots.push({
         rootCid: result.rootCid,
-        error: result.error,
+        error: /** @type {{error: string}} */ (result).error,
       })
     }
     afterRootCid = rootCids[rootCids.length - 1]
@@ -602,7 +603,9 @@ export async function runVerify({ db, dir, chain, concurrency, focApiUrl }) {
     const commitStats = tracking.getCommitStats()
 
     console.log('checking on-chain dataset liveness')
-    const iSdataSetLive = await dataSetLive(publicClient, { dataSetId: BigInt(metadata.dataSetId) })
+    const iSdataSetLive = await dataSetLive(/** @type {any} */ (publicClient), {
+      dataSetId: BigInt(metadata.dataSetId),
+    })
     console.log('checking committed root reachability')
 
     const roots = await verifyCommittedRoots(tracking, metadata.serviceUrl, concurrency ?? DEFAULT_VERIFY_CONCURRENCY)

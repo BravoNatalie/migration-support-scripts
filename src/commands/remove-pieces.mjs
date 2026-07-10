@@ -1,4 +1,4 @@
-import { readFileSync, appendFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
 import { fromSecp256k1 } from '@filoz/synapse-core/session-key'
@@ -108,13 +108,13 @@ export async function runRemovePieces({
       const txHash = await scheduleDeletions({ serviceUrl, dataSetId, pieceIds: batch, extraData })
       scheduled += batch.length
       for (const pieceId of batch) {
-        appendFileSync(logFile, JSON.stringify({ pieceId, ok: true, txHash, at: Date.now() }) + '\n')
+        appendFileSync(logFile, `${JSON.stringify({ pieceId, ok: true, txHash, at: Date.now() })}\n`)
       }
       console.log(`remove-pieces: batch of ${batch.length} scheduled, tx ${txHash} (${scheduled}/${ids.length})`)
     } catch (err) {
       const error = String(err?.message || err)
       for (const pieceId of batch) {
-        appendFileSync(logFile, JSON.stringify({ pieceId, ok: false, error, at: Date.now() }) + '\n')
+        appendFileSync(logFile, `${JSON.stringify({ pieceId, ok: false, error, at: Date.now() })}\n`)
       }
       if (error.includes('Too many removals')) {
         console.log(

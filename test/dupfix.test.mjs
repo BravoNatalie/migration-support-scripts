@@ -4,8 +4,8 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 
-import { resolvePresumedFailure } from '../commands/commit.mjs'
-import { openTrackingDb } from '../lib/tracking-db.mjs'
+import { resolvePresumedFailure } from '../src/commands/commit.mjs'
+import { openTrackingDb } from '../src/lib/tracking-db.mjs'
 
 const cleanups = []
 afterEach(() => {
@@ -98,8 +98,8 @@ describe('resolvePresumedFailure', () => {
     }
 
     const result = await resolvePresumedFailure({
-      tracking,
-      onChain,
+      tracking: /** @type {any} */ (tracking),
+      onChain: /** @type {any} */ (onChain),
       rows,
       error: 'Request timed out after 300000ms',
       polls: 4,
@@ -124,8 +124,8 @@ describe('resolvePresumedFailure', () => {
     }
 
     const result = await resolvePresumedFailure({
-      tracking,
-      onChain,
+      tracking: /** @type {any} */ (tracking),
+      onChain: /** @type {any} */ (onChain),
       rows,
       error: 'boom',
       polls: 3,
@@ -149,8 +149,8 @@ describe('resolvePresumedFailure', () => {
     }
 
     const result = await resolvePresumedFailure({
-      tracking,
-      onChain,
+      tracking: /** @type {any} */ (tracking),
+      onChain: /** @type {any} */ (onChain),
       rows,
       error: 'partial',
       polls: 2,

@@ -13,8 +13,9 @@ import { Worker } from 'node:worker_threads'
 
 import pMap from 'p-map'
 
-import { pathExists, renderProgressLine } from '../../utils.js'
+import { pathExists } from '../lib/files.mjs'
 import { pieceCarPath, shardCarPath } from '../lib/layout.mjs'
+import { renderProgressLine } from '../lib/progress.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const DEFAULT_PREPARE_CONCURRENCY = 16
@@ -54,7 +55,7 @@ class PieceCidWorkerPool {
     for (let i = 0; i < Math.max(1, size); i++) {
       const worker = new Worker(this.workerPath)
       worker.on('message', (msg) => this._onMessage(worker, msg))
-      worker.on('error', (err) => this._onError(worker, err))
+      worker.on('error', (err) => this._onError(worker, /** @type {Error} */ (err)))
       worker.on('exit', (code) => this._onExit(worker, code))
       this.workers.push(worker)
       this.idle.push(worker)

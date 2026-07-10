@@ -21,11 +21,11 @@ import { parseArgs } from 'node:util'
 import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import { isAddress } from 'viem/utils'
 import { runCommit } from './commands/commit.mjs'
-import { runRemovePieces } from './commands/remove-pieces.mjs'
-import { runReportDuplicates } from './commands/report-duplicates.mjs'
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
 import { runPrepare } from './commands/prepare.mjs'
+import { runRemovePieces } from './commands/remove-pieces.mjs'
+import { runReportDuplicates } from './commands/report-duplicates.mjs'
 import { runVerify } from './commands/verify.mjs'
 
 function usage() {
@@ -328,7 +328,7 @@ async function removePieces(argv) {
     dir: requireDir(values.dir, 'remove-pieces'),
     serviceUrl: requireServiceUrl(values['service-url']),
     customerWallet: parseAddress(values['customer-wallet'], '--customer-wallet'),
-    sessionKey,
+    sessionKey: /** @type {`0x${string}`} */ (sessionKey),
     chain: parseCommitNetwork(values.network),
     idsFile: values['ids-file'],
     limit: values.limit != null ? Number(values.limit) : undefined,
@@ -399,6 +399,11 @@ async function verify(argv) {
 const [, , sub, ...rest] = process.argv
 
 async function main() {
+  if (sub === '--help' || sub === '-h') {
+    usage()
+    return
+  }
+
   switch (sub) {
     case 'create':
       await create(rest)
@@ -417,6 +422,7 @@ async function main() {
       break
     case 'remove-pieces':
       await removePieces(rest)
+      break
     case 'verify':
       await verify(rest)
       break

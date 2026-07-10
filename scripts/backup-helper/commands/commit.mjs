@@ -23,7 +23,7 @@ import { parkingResultsDir, shardsDir } from '../lib/layout.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
 const PARKING_BATCH_SIZE = 50
-const COMMIT_BATCH_SIZE = 20
+const COMMIT_BATCH_SIZE = 40
 const PARKING_RECOVERY_BATCH_SIZE = 1_000
 const DEFAULT_COMMIT_CONCURRENCY = 4
 const EMPTY_POLL_INTERVAL_MS = 1_000
@@ -35,6 +35,10 @@ const WAIT_ADD_PIECES_TIMEOUT_MS = 60 * 60 * 1_000
 // simultaneous gas estimations into lotus, which times out and 500s most of the
 // batch (observed: 63/64 failed at launch with concurrency 64).
 const WORKER_START_STAGGER_MS = 750
+const LATE_INCLUSION_POLLS = 6
+const LATE_INCLUSION_POLL_INTERVAL_MS = 60 * 1_000
+const ONCHAIN_REFRESH_MIN_INTERVAL_MS = 55 * 1_000
+const ONCHAIN_BACKGROUND_REFRESH_MS = 5 * 60 * 1_000
 
 /**
  * @typedef {object} CommitRow
@@ -283,6 +287,80 @@ async function fetchDataSetPieceCids(serviceUrl, dataSetId) {
  * @param {string} serviceUrl
  * @param {string} pieceCid
  */
+/**
+ * @param {string} serviceUrl
+ * @param {number} dataSetId
+ */
+export function makeOnChainPieceCidSet(serviceUrl, dataSetId) {
+  let cids = new Set()
+  let lastRefreshAt = 0
+  let inFlight = null
+
+  return {
+    has(pieceCid) {
+      return cids.has(String(pieceCid).toLowerCase())
+    },
+    add(pieceCids) {
+      for (const pieceCid of pieceCids) cids.add(String(pieceCid).toLowerCase())
+    },
+    get size() {
+      return cids.size
+    },
+    async refresh() {
+      if (inFlight) return inFlight
+      if (Date.now() - lastRefreshAt < ONCHAIN_REFRESH_MIN_INTERVAL_MS) return cids
+      inFlight = fetchDataSetPieceCids(serviceUrl, dataSetId)
+        .then((next) => {
+          for (const pieceCid of cids) next.add(pieceCid)
+          cids = next
+          lastRefreshAt = Date.now()
+          return cids
+        })
+        .finally(() => {
+          inFlight = null
+        })
+      return inFlight
+    },
+  }
+}
+
+/**
+ * @param {object} args
+ * @param {TrackingDb} args.tracking
+ * @param {ReturnType<typeof makeOnChainPieceCidSet>} args.onChain
+ * @param {CommitRow[]} args.rows
+ * @param {string} args.error
+ * @param {number} [args.polls]
+ * @param {number} [args.intervalMs]
+ */
+export async function resolvePresumedFailure({
+  tracking,
+  onChain,
+  rows,
+  error,
+  polls = LATE_INCLUSION_POLLS,
+  intervalMs = LATE_INCLUSION_POLL_INTERVAL_MS,
+}) {
+  for (let attempt = 0; attempt < polls; attempt++) {
+    await sleep(intervalMs)
+    try {
+      await onChain.refresh()
+    } catch {
+      continue
+    }
+    if (rows.every((row) => onChain.has(row.pieceCid))) {
+      tracking.markCommitBatchSucceeded(rows, 'late-landed')
+      return { success: true, lateLanded: true }
+    }
+  }
+  tracking.markCommitBatchFailed(rows, error)
+  return { success: false }
+}
+
+/**
+ * @param {string} serviceUrl
+ * @param {string} pieceCid
+ */
 async function isPieceAvailable(serviceUrl, pieceCid) {
   const baseUrl = serviceUrl.endsWith('/') ? serviceUrl : `${serviceUrl}/`
   const url = new URL(`piece/${pieceCid}`, baseUrl)
@@ -345,22 +423,26 @@ async function recoverParkedPieces({ tracking, serviceUrl, concurrency }) {
  * @param {TrackingDb} args.tracking
  * @param {CommitRow[]} args.rows
  */
-async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId, tracking, rows }) {
+async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId, tracking, onChain, rows }) {
+  let addResult
   try {
-    const addResult = await addPieces(sessionKey.client, {
+    addResult = await addPieces(sessionKey.client, {
       serviceURL: serviceUrl,
       dataSetId: BigInt(dataSetId),
       clientDataSetId,
       pieces: buildCommitPieces(rows),
     })
+  } catch (err) {
+    return resolvePresumedFailure({ tracking, onChain, rows, error: String(err?.message || err) })
+  }
+
+  try {
     const addStatus = await waitForAddPieces({ statusUrl: addResult.statusUrl, timeout: WAIT_ADD_PIECES_TIMEOUT_MS })
-
     tracking.markCommitBatchSucceeded(rows, addStatus.txHash.toString())
-
+    onChain.add(rows.map((row) => row.pieceCid))
     return { success: true }
   } catch (err) {
-    tracking.markCommitBatchFailed(rows, String(err?.message || err))
-    return { success: false }
+    return resolvePresumedFailure({ tracking, onChain, rows, error: String(err?.message || err) })
   }
 }
 
@@ -375,6 +457,7 @@ async function commitBatch({ sessionKey, serviceUrl, dataSetId, clientDataSetId,
  * @param {string} args.target
  * @param {number | undefined} args.concurrency
  * @param {boolean} args.retry
+ * @param {boolean} [args.dryRun]
  */
 export async function runCommit({
   dir,
@@ -386,6 +469,7 @@ export async function runCommit({
   target,
   concurrency,
   retry,
+  dryRun,
 }) {
   const tracking = openTrackingDb(dir)
   const commitConcurrency = concurrency ?? DEFAULT_COMMIT_CONCURRENCY
@@ -398,9 +482,6 @@ export async function runCommit({
   try {
     tracking.initMigrationMetadata({ clientWallet: customerWallet, serviceUrl, providerAddress })
     metadataInitialized = true
-    if (retry) {
-      tracking.resetCommitRowsForRetry()
-    }
 
     console.log(`crate session key...`)
     const session = await createSessionKey(/** @type {`0x${string}`} */ (sessionKey), customerWallet, chain)
@@ -415,8 +496,38 @@ export async function runCommit({
     })
 
     console.log(`loading on-chain piece list for dedupe guard...`)
-    const onChainPieceCids = await fetchDataSetPieceCids(serviceUrl, ensuredDataSet.dataSetId)
-    console.log(`dedupe guard: ${onChainPieceCids.size} pieces already on-chain`)
+    const onChain = makeOnChainPieceCidSet(serviceUrl, ensuredDataSet.dataSetId)
+    await onChain.refresh()
+    console.log(`dedupe guard: ${onChain.size} pieces already on-chain`)
+
+    const unresolved = tracking.listUnresolvedCommitPieceCids()
+    const landed = unresolved.filter((pieceCid) => onChain.has(pieceCid))
+    if (landed.length > 0) {
+      const reconciled = tracking.reconcileCommittedByPieceCids(landed, 'reconciled-on-chain')
+      console.log(`reconcile: ${reconciled} rows (${landed.length} piece CIDs) already on-chain, marked committed`)
+    }
+    if (retry) {
+      const requeued = tracking.resetCommitRowsForRetry()
+      if (requeued > 0) console.log(`retry: re-parked ${requeued} unresolved rows`)
+    }
+
+    if (dryRun) {
+      const parkedCids = tracking.listParkedCommitPieceCids()
+      const skip = parkedCids.filter((pieceCid) => onChain.has(pieceCid)).length
+      const stats = tracking.getCommitStats()
+      console.log(
+        `dry-run: parked=${parkedCids.length} already-on-chain(skip)=${skip} would-commit=${parkedCids.length - skip}`,
+      )
+      console.log(
+        `dry-run: stats pending=${stats.pending} parked=${stats.parked} committing=${stats.committing} committed=${stats.committed} failed=${stats.failed}`,
+      )
+      return
+    }
+
+    const onChainRefreshTimer = setInterval(() => {
+      onChain.refresh().catch(() => {})
+    }, ONCHAIN_BACKGROUND_REFRESH_MS)
+    onChainRefreshTimer.unref?.()
 
     const parkingLane = (async () => {
       try {
@@ -460,28 +571,23 @@ export async function runCommit({
           continue
         }
 
-        // Dedupe guard: a piece already in the data set (e.g. from a batch that
-        // timed out client-side but landed on-chain) must not be re-added --
-        // re-adding mints a duplicate on-chain entry. Mark it succeeded instead.
-        const alreadyOnChain = rows.filter((row) => onChainPieceCids.has(row.pieceCid.toLowerCase()))
+        const alreadyOnChain = rows.filter((row) => onChain.has(row.pieceCid))
         if (alreadyOnChain.length > 0) {
           tracking.markCommitBatchSucceeded(alreadyOnChain, 'already-on-chain')
           renderCommitProgress(tracking.getCommitStats())
         }
-        const toCommit = rows.filter((row) => !onChainPieceCids.has(row.pieceCid.toLowerCase()))
+        const toCommit = rows.filter((row) => !onChain.has(row.pieceCid))
         if (toCommit.length === 0) continue
 
-        const batchResult = await commitBatch({
+        await commitBatch({
           sessionKey: session,
           serviceUrl,
           dataSetId: ensuredDataSet.dataSetId,
           clientDataSetId: ensuredDataSet.clientDataSetId,
           tracking,
+          onChain,
           rows: toCommit,
         })
-        if (batchResult.success) {
-          for (const row of toCommit) onChainPieceCids.add(row.pieceCid.toLowerCase())
-        }
         renderCommitProgress(tracking.getCommitStats())
       }
     }

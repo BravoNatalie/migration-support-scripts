@@ -11,6 +11,7 @@
  *   prepare   --dir <output-dir> [--concurrency N]
  *   commit    --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x...
  *             [--network mainnet|calibration] [--concurrency N] [--retry]
+ *   verify    --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N]
  */
 
 import fs from 'node:fs'
@@ -25,13 +26,15 @@ import { runReportDuplicates } from './commands/report-duplicates.mjs'
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
 import { runPrepare } from './commands/prepare.mjs'
+import { runVerify } from './commands/verify.mjs'
 
 function usage() {
   console.error(`Usage:
   backup-helper create   --db <space-inventory.db> --dir <output-dir>
   backup-helper download --dir <output-dir> [--concurrency N] [--port N]
   backup-helper prepare  --dir <output-dir> [--concurrency N]
-  backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]`)
+  backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
+  backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]`)
 }
 
 /**
@@ -361,6 +364,38 @@ async function reportDuplicates(argv) {
   })
 }
 
+/**
+ * @param {string[]} argv
+ */
+async function verify(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        db: { type: 'string' },
+        dir: { type: 'string' },
+        network: { type: 'string' },
+        concurrency: { type: 'string' },
+        'foc-api-url': { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  await runVerify({
+    db: requireDb(values.db, 'verify'),
+    dir: requireDir(values.dir, 'verify'),
+    chain: parseCommitNetwork(values.network),
+    concurrency: parseConcurrency(values.concurrency, 'verify'),
+    focApiUrl: values['foc-api-url'],
+  })
+}
+
 const [, , sub, ...rest] = process.argv
 
 async function main() {
@@ -382,6 +417,8 @@ async function main() {
       break
     case 'remove-pieces':
       await removePieces(rest)
+    case 'verify':
+      await verify(rest)
       break
     default:
       usage()

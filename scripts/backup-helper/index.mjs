@@ -32,7 +32,7 @@ function usage() {
   backup-helper download --dir <output-dir> [--concurrency N] [--port N]
   backup-helper prepare  --dir <output-dir> [--concurrency N]
   backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
-  backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N]`)
+  backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]`)
 }
 
 /**
@@ -299,6 +299,7 @@ async function verify(argv) {
         dir: { type: 'string' },
         network: { type: 'string' },
         concurrency: { type: 'string' },
+        'foc-api-url': { type: 'string' },
       },
       allowPositionals: false,
       strict: true,
@@ -313,6 +314,7 @@ async function verify(argv) {
     dir: requireDir(values.dir, 'verify'),
     chain: parseCommitNetwork(values.network),
     concurrency: parseConcurrency(values.concurrency, 'verify'),
+    focApiUrl: values['foc-api-url'],
   })
 }
 

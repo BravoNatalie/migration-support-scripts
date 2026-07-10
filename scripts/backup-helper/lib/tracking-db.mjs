@@ -212,9 +212,6 @@ export function openTrackingDb(dir) {
     VALUES (?, ?)
   `)
 
-  const countShardsStmt = db.prepare('SELECT COUNT(*) AS n FROM shards')
-  const countDistinctRootsStmt = db.prepare('SELECT COUNT(DISTINCT root_cid) AS n FROM root_shards')
-
   const iterForManifestStmt = db.prepare(`
     SELECT shard_cid, source_url FROM shards ORDER BY shard_cid
   `)
@@ -398,6 +395,15 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
+  const committedPiecesByRootStmt = db.prepare(`
+    SELECT DISTINCT piece_cid, tx_hash
+    FROM root_shards
+    WHERE root_cid = ?
+      AND commit_status = '${COMMIT_STATUS.committed}'
+      AND piece_cid IS NOT NULL
+    ORDER BY piece_cid
+  `)
+
   const claimCommitCandidatesStmt = db.prepare(`
     SELECT root_cid, shard_cid, piece_cid
     FROM root_shards
@@ -508,14 +514,59 @@ export function openTrackingDb(dir) {
       return count
     },
 
-    /** Total unique shards in tracking.db. */
-    countShards() {
-      return Number(countShardsStmt.get().n)
+    /**
+     * Count distinct shard_cids present in the input inventory db at
+     * `inventoryPath` but NOT present in tracking.shards. Returns 0 when every
+     * inventory shard is covered.
+     *
+     * Tracking can be a superset of any single inventory (`create` may be run
+     * with multiple inventories targeting the same dir), so equality of counts
+     * is not a valid check. This anti-join answers the right question:
+     * "is the inventory a subset of tracking?".
+     *
+     * @param {string} inventoryPath
+     */
+    countInventoryShardsMissing(inventoryPath) {
+      const escaped = inventoryPath.replace(/'/g, "''")
+      db.exec(`ATTACH DATABASE '${escaped}' AS inv`)
+      try {
+        const row = db
+          .prepare(
+            `SELECT COUNT(DISTINCT inv_s.shard_cid) AS n
+             FROM inv.shards AS inv_s
+             LEFT JOIN main.shards AS t ON t.shard_cid = inv_s.shard_cid
+             WHERE t.shard_cid IS NULL`,
+          )
+          .get()
+        return Number(row.n)
+      } finally {
+        db.exec('DETACH DATABASE inv')
+      }
     },
 
-    /** Total distinct roots in tracking.db. */
-    countDistinctRoots() {
-      return Number(countDistinctRootsStmt.get().n)
+    /**
+     * Count distinct root_cids present in the input inventory db at
+     * `inventoryPath` but NOT present in tracking.root_shards. Returns 0 when
+     * every inventory root is covered.
+     *
+     * @param {string} inventoryPath
+     */
+    countInventoryRootsMissing(inventoryPath) {
+      const escaped = inventoryPath.replace(/'/g, "''")
+      db.exec(`ATTACH DATABASE '${escaped}' AS inv`)
+      try {
+        const row = db
+          .prepare(
+            `SELECT COUNT(DISTINCT inv_s.root_cid) AS n
+             FROM inv.shards AS inv_s
+             LEFT JOIN main.root_shards AS t ON t.root_cid = inv_s.root_cid
+             WHERE t.root_cid IS NULL`,
+          )
+          .get()
+        return Number(row.n)
+      } finally {
+        db.exec('DETACH DATABASE inv')
+      }
     },
 
     /**
@@ -621,6 +672,19 @@ export function openTrackingDb(dir) {
      */
     listCommittedRootCids(limit, afterRootCid) {
       return committedRootCidsStmt.all(afterRootCid, limit).map((row) => row.root_cid.toString())
+    },
+
+    /**
+     * List all committed pieces for a single root CID.
+     *
+     * @param {string} rootCid
+     * @returns {{ pieceCid: string, txHash: string | null }[]}
+     */
+    listCommittedPiecesByRootCid(rootCid) {
+      return committedPiecesByRootStmt.all(rootCid).map((row) => ({
+        pieceCid: row.piece_cid.toString(),
+        txHash: row.tx_hash?.toString() ?? null,
+      }))
     },
 
     /**

@@ -13,15 +13,16 @@
   "scripts": {
     "backup-helper": "node src/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "biome:check": "biome check README.md package.json pnpm-lock.yaml biome.json tsconfig.json src test/dupfix.test.mjs",
-    "biome:write": "biome check --write README.md package.json pnpm-lock.yaml biome.json tsconfig.json src test/dupfix.test.mjs",
-    "test": "vitest run test/dupfix.test.mjs"
+    "biome:check": "biome check README.md package.json pnpm-lock.yaml biome.json tsconfig.json src test",
+    "biome:write": "biome check --write README.md package.json pnpm-lock.yaml biome.json tsconfig.json src test",
+    "test": "vitest run"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "@filoz/synapse-core": "^0.5.2",
+    "@web3-storage/data-segment": "5.3.0",
     "aria2": "^5.0.0",
     "execa": "^9.6.1",
     "p-map": "^7.0.4",

@@ -12,6 +12,7 @@
  *   commit    --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x...
  *             [--network mainnet|calibration] [--concurrency N] [--retry]
  *   verify    --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N]
+ *   aggregate-plan --dir <output-dir> [--max-size-bytes N]
  */
 
 import fs from 'node:fs'
@@ -20,6 +21,7 @@ import { parseArgs } from 'node:util'
 
 import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import { isAddress } from 'viem/utils'
+import { parsePositiveBigInt, runAggregatePlan } from './commands/aggregate-plan.mjs'
 import { runCommit } from './commands/commit.mjs'
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
@@ -34,7 +36,8 @@ function usage() {
   backup-helper download --dir <output-dir> [--concurrency N] [--port N]
   backup-helper prepare  --dir <output-dir> [--concurrency N]
   backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
-  backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]`)
+  backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]
+  backup-helper aggregate-plan --dir <output-dir> [--max-size-bytes N]`)
 }
 
 /**
@@ -337,6 +340,37 @@ async function removePieces(argv) {
   })
 }
 
+async function aggregatePlan(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        dir: { type: 'string' },
+        'max-size-bytes': { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  let maxSizeBytes
+  try {
+    maxSizeBytes = parsePositiveBigInt(values['max-size-bytes'], '--max-size-bytes')
+  } catch (err) {
+    console.error(`Error: aggregate-plan: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  await runAggregatePlan({
+    dir: requireDir(values.dir, 'aggregate-plan'),
+    maxSizeBytes,
+  })
+}
+
 async function reportDuplicates(argv) {
   let values
   try {
@@ -425,6 +459,9 @@ async function main() {
       break
     case 'verify':
       await verify(rest)
+      break
+    case 'aggregate-plan':
+      await aggregatePlan(rest)
       break
     default:
       usage()

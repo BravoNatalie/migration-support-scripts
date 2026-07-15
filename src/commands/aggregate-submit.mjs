@@ -14,7 +14,8 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { renderProgressLine } from '../lib/progress.mjs'
 import { openTrackingDb } from '../lib/tracking-db.mjs'
 
-const AGGREGATE_SUBMIT_BATCH_SIZE = 100
+const AGGREGATE_PAGE_SIZE = 100
+const AGGREGATE_ADD_BATCH_SIZE = 40
 const AGGREGATE_SUB_PIECE_BATCH_SIZE = 10_000
 const ACTIVE_PIECES_PAGE_SIZE = 100n
 const WAIT_ADD_PIECES_TIMEOUT_MS = 60 * 60 * 1_000
@@ -138,6 +139,9 @@ async function ensureAggregateDataSet({
 
   const dataSetIdToUse = existingDataSetId ?? requestedDataSetId
   if (dataSetIdToUse != null) {
+    const live = await dataSetLive(/** @type {any} */ (publicClient), { dataSetId: BigInt(dataSetIdToUse) })
+    if (!live) throw new Error(`aggregate-submit: aggregate dataset ${dataSetIdToUse} is not live`)
+
     const dataSetInfo = await getDataSet(publicClient, { dataSetId: BigInt(dataSetIdToUse) })
     if (!dataSetInfo) {
       throw new Error(`aggregate-submit: aggregate dataset ${dataSetIdToUse} was not found on-chain`)
@@ -209,17 +213,15 @@ function listAllSubPieces(tracking, aggregateId) {
 /**
  * @param {any} walletClient
  * @param {bigint} clientDataSetId
- * @param {string} aggregatePieceCid
+ * @param {{ aggregatePieceCid: string }[]} aggregates
  */
-async function signAggregateAdd(walletClient, clientDataSetId, aggregatePieceCid) {
+async function signAggregateAdd(walletClient, clientDataSetId, aggregates) {
   return signAddPieces(walletClient, {
     clientDataSetId,
-    pieces: [
-      {
-        pieceCid: parsePieceCid(aggregatePieceCid),
-        metadata: [],
-      },
-    ],
+    pieces: aggregates.map((aggregate) => ({
+      pieceCid: parsePieceCid(aggregate.aggregatePieceCid),
+      metadata: [],
+    })),
   })
 }
 
@@ -227,21 +229,18 @@ async function signAggregateAdd(walletClient, clientDataSetId, aggregatePieceCid
  * @param {object} args
  * @param {string} args.serviceUrl
  * @param {number} args.dataSetId
- * @param {string} args.aggregatePieceCid
- * @param {string[]} args.subPieces
+ * @param {{ aggregatePieceCid: string, subPieces: string[] }[]} args.aggregates
  * @param {`0x${string}`} args.extraData
  */
-async function submitAggregateAdd({ serviceUrl, dataSetId, aggregatePieceCid, subPieces, extraData }) {
+async function submitAggregateAdd({ serviceUrl, dataSetId, aggregates, extraData }) {
   const response = await fetch(new URL(`pdp/data-sets/${dataSetId}/pieces`, normalizeServiceUrl(serviceUrl)), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      pieces: [
-        {
-          pieceCid: aggregatePieceCid,
-          subPieces: subPieces.map((subPieceCid) => ({ subPieceCid })),
-        },
-      ],
+      pieces: aggregates.map((aggregate) => ({
+        pieceCid: aggregate.aggregatePieceCid,
+        subPieces: aggregate.subPieces.map((subPieceCid) => ({ subPieceCid })),
+      })),
       extraData,
     }),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -278,7 +277,7 @@ async function reconcileIfActive({ tracking, publicClient, dataSetId, activePiec
   if (pieceId == null) {
     const refreshed = await listActivePieceMap(publicClient, dataSetId)
     activePieces.clear()
-    for (const entry of refreshed) activePieces.set(entry[0], entry[1])
+    for (const [cid, id] of refreshed) activePieces.set(cid, id)
     pieceId = activePieces.get(aggregate.aggregatePieceCid)
   }
 
@@ -314,8 +313,11 @@ async function recoverAggregateTransactions({
   listAggregates,
   progressLabel,
 }) {
+  const pdpVerifier = /** @type {any} */ (getPdpVerifierContract)(/** @type {any} */ ({ client: publicClient }))
+  /** @type {Map<string, { confirmedPieceIds: bigint[] }>} */
+  const resolvedTxStatus = new Map()
   let afterAggregateId = 0
-  let checked = 0
+  let polled = 0
   let committed = 0
   let failed = 0
 
@@ -325,21 +327,33 @@ async function recoverAggregateTransactions({
 
     for (const aggregate of aggregates) {
       afterAggregateId = aggregate.aggregateId
-      checked += 1
       if (!aggregate.txHash) continue
 
+      polled += 1
       try {
-        const addStatus = await waitForAddPieces({
-          statusUrl: addStatusUrl(serviceUrl, dataSetId, aggregate.txHash),
-          timeout: WAIT_ADD_PIECES_TIMEOUT_MS,
-        })
-        const [pieceId] = addStatus.confirmedPieceIds
+        let addStatus = resolvedTxStatus.get(aggregate.txHash)
+        if (!addStatus) {
+          addStatus = await waitForAddPieces({
+            statusUrl: addStatusUrl(serviceUrl, dataSetId, aggregate.txHash),
+            timeout: WAIT_ADD_PIECES_TIMEOUT_MS,
+          })
+          await Promise.all(
+            addStatus.confirmedPieceIds.map(async (pieceId) => {
+              const result = await pdpVerifier.read.getPieceCid([BigInt(dataSetId), pieceId])
+              activePieces.set(hexToPieceCID(result.data).toString(), pieceId)
+            }),
+          )
+          resolvedTxStatus.set(aggregate.txHash, addStatus)
+        }
+
+        const pieceId = activePieces.get(aggregate.aggregatePieceCid)
         if (pieceId == null) {
-          throw new Error(`aggregate add ${aggregate.txHash} succeeded without a confirmed piece id`)
+          throw new Error(
+            `aggregate add ${aggregate.txHash} confirmed but piece ${aggregate.aggregatePieceCid} not found in confirmed set`,
+          )
         }
 
         tracking.markAggregateCommitted(aggregate.aggregateId, dataSetId, aggregate.txHash, pieceId)
-        activePieces.set(aggregate.aggregatePieceCid, pieceId)
         committed += 1
       } catch (err) {
         const landed = await reconcileIfActive({
@@ -359,19 +373,17 @@ async function recoverAggregateTransactions({
       }
 
       renderProgressLine(
-        `${progressLabel}: checked ${formatCount(checked)}, committed ${formatCount(committed)}, failed ${formatCount(
-          failed,
-        )}`,
+        `${progressLabel}: polled ${formatCount(polled)}, committed ${formatCount(committed)}, failed ${formatCount(failed)}`,
       )
     }
   }
 
-  return { checked, committed, failed }
+  return { committed, failed }
 }
 
 /**
- * Reconcile rows claimed before a tx hash was persisted.
- * These rows are not retried because the POST may have reached the provider.
+ * Check orphaned submitting rows — claimed but with no tx hash — against on-chain
+ * state. These rows are not retried because the POST may have reached the provider.
  *
  * @param {object} args
  * @param {TrackingDb} args.tracking
@@ -380,11 +392,9 @@ async function recoverAggregateTransactions({
  * @param {Map<string, bigint>} args.activePieces
  * @param {number} args.limit
  */
-async function resolveUnsubmittedClaims({ tracking, publicClient, dataSetId, activePieces, limit }) {
+async function reconcileOrphanedSubmissions({ tracking, publicClient, dataSetId, activePieces, limit }) {
   let afterAggregateId = 0
-  let checked = 0
   let committed = 0
-  const failed = 0
   let unknown = 0
 
   while (true) {
@@ -393,7 +403,6 @@ async function resolveUnsubmittedClaims({ tracking, publicClient, dataSetId, act
 
     for (const aggregate of aggregates) {
       afterAggregateId = aggregate.aggregateId
-      checked += 1
 
       const landed = await reconcileIfActive({
         tracking,
@@ -412,10 +421,14 @@ async function resolveUnsubmittedClaims({ tracking, publicClient, dataSetId, act
     }
   }
 
-  return { checked, committed, failed, unknown }
+  return { committed, unknown }
 }
 
 /**
+ * Submit one batch of aggregate roots in a single AddPieces request.
+ * All rows receive the same transaction hash, while success/failure recovery
+ * still reconciles each aggregate root independently.
+ *
  * @param {object} args
  * @param {TrackingDb} args.tracking
  * @param {any} args.walletClient
@@ -423,69 +436,122 @@ async function resolveUnsubmittedClaims({ tracking, publicClient, dataSetId, act
  * @param {string} args.serviceUrl
  * @param {{ dataSetId: number, clientDataSetId: bigint }} args.dataSet
  * @param {Map<string, bigint>} args.activePieces
- * @param {{ aggregateId: number, aggregatePieceCid: string, txHash: string | null }} args.aggregate
+ * @param {{ aggregateId: number, aggregatePieceCid: string, txHash: string | null, subPieces: string[] }[]} args.aggregates
  */
-async function submitAggregate({ tracking, walletClient, publicClient, serviceUrl, dataSet, activePieces, aggregate }) {
-  const activePieceId = activePieces.get(aggregate.aggregatePieceCid)
-  if (activePieceId != null) {
-    tracking.markAggregateCommitted(
-      aggregate.aggregateId,
-      dataSet.dataSetId,
-      aggregate.txHash ?? 'already-active',
-      activePieceId,
-    )
-    return { skippedActive: 1, submitted: 0, committed: 1, failed: 0, unknown: 0 }
+async function submitAggregateBatch({
+  tracking,
+  walletClient,
+  publicClient,
+  serviceUrl,
+  dataSet,
+  activePieces,
+  aggregates,
+}) {
+  /** @type {{ aggregateId: number, aggregatePieceCid: string, txHash: string | null, subPieces: string[] }[]} */
+  const claimedAggregates = []
+  for (const aggregate of aggregates) {
+    if (tracking.claimAggregatePiece(aggregate.aggregateId)) claimedAggregates.push(aggregate)
   }
 
-  if (!tracking.claimAggregatePiece(aggregate.aggregateId)) {
-    return { skippedActive: 0, submitted: 0, committed: 0, failed: 0, unknown: 0 }
+  if (claimedAggregates.length === 0) {
+    return { submitted: 0, addRequests: 0, committed: 0, failed: 0, unknown: 0 }
   }
 
-  let txHash = aggregate.txHash
+  let txHash = /** @type {string | null} */ (null)
+  let postStarted = false
+
   try {
-    const subPieces = listAllSubPieces(tracking, aggregate.aggregateId)
-    const extraData = await signAggregateAdd(walletClient, dataSet.clientDataSetId, aggregate.aggregatePieceCid)
+    const extraData = await signAggregateAdd(walletClient, dataSet.clientDataSetId, claimedAggregates)
+    postStarted = true
     const addResult = await submitAggregateAdd({
       serviceUrl,
       dataSetId: dataSet.dataSetId,
-      aggregatePieceCid: aggregate.aggregatePieceCid,
-      subPieces,
+      aggregates: claimedAggregates,
       extraData,
     })
     txHash = addResult.txHash
-    tracking.markAggregateSubmitting(aggregate.aggregateId, dataSet.dataSetId, txHash)
+
+    for (const aggregate of claimedAggregates) {
+      if (!tracking.recordAggregateSubmitTx(aggregate.aggregateId, dataSet.dataSetId, txHash)) {
+        throw new Error(
+          `aggregate ${aggregate.aggregateId} was not in submitting state when recording tx hash ${txHash}`,
+        )
+      }
+    }
 
     const addStatus = await waitForAddPieces({
       statusUrl: addResult.statusUrl,
       timeout: WAIT_ADD_PIECES_TIMEOUT_MS,
     })
-    const [pieceId] = addStatus.confirmedPieceIds
-    if (pieceId == null) {
-      throw new Error(`aggregate add ${txHash} succeeded without a confirmed piece id`)
+    if (addStatus.confirmedPieceIds.length < claimedAggregates.length) {
+      throw new Error(
+        `aggregate add ${txHash} confirmed ${addStatus.confirmedPieceIds.length} piece ids for ${claimedAggregates.length} aggregate pieces`,
+      )
     }
 
-    tracking.markAggregateCommitted(aggregate.aggregateId, dataSet.dataSetId, txHash, pieceId)
-    activePieces.set(aggregate.aggregatePieceCid, pieceId)
-    return { skippedActive: 0, submitted: 1, committed: 1, failed: 0, unknown: 0 }
+    const pieceIds = claimedAggregates.map((_, index) => addStatus.confirmedPieceIds[index])
+    if (pieceIds.some((pieceId) => pieceId == null)) {
+      throw new Error(`aggregate add ${txHash} succeeded without all confirmed piece ids`)
+    }
+
+    for (const [index, aggregate] of claimedAggregates.entries()) {
+      const pieceId = /** @type {bigint} */ (pieceIds[index])
+      tracking.markAggregateCommitted(aggregate.aggregateId, dataSet.dataSetId, txHash, pieceId)
+      activePieces.set(aggregate.aggregatePieceCid, pieceId)
+    }
+
+    return {
+      submitted: claimedAggregates.length,
+      addRequests: 1,
+      committed: claimedAggregates.length,
+      failed: 0,
+      unknown: 0,
+    }
   } catch (err) {
-    const landed = await reconcileIfActive({
-      tracking,
-      publicClient,
-      dataSetId: dataSet.dataSetId,
-      activePieces,
-      aggregate,
-      txHash,
-    })
-    if (landed) {
-      return { skippedActive: 0, submitted: txHash ? 1 : 0, committed: 1, failed: 0, unknown: 0 }
+    let committed = 0
+    let failed = 0
+    let unknown = 0
+
+    for (const aggregate of claimedAggregates) {
+      const landed = await reconcileIfActive({
+        tracking,
+        publicClient,
+        dataSetId: dataSet.dataSetId,
+        activePieces,
+        aggregate,
+        txHash,
+      })
+      if (landed) {
+        committed += 1
+        continue
+      }
+
+      if (!txHash && postStarted) {
+        unknown += 1
+        continue
+      }
+
+      if (txHash) {
+        tracking.updateAggregateStatus({
+          aggregateId: aggregate.aggregateId,
+          status: tracking.AGGREGATE_STATUS.failed,
+          dataSetId: dataSet.dataSetId,
+          txHash,
+          lastError: errorMessage(err),
+        })
+      } else {
+        tracking.markAggregateFailed(aggregate.aggregateId, errorMessage(err))
+      }
+      failed += 1
     }
 
-    if (!txHash) {
-      return { skippedActive: 0, submitted: 0, committed: 0, failed: 0, unknown: 1 }
+    return {
+      submitted: txHash ? claimedAggregates.length : 0,
+      addRequests: txHash ? 1 : 0,
+      committed,
+      failed,
+      unknown,
     }
-
-    tracking.markAggregateFailed(aggregate.aggregateId, errorMessage(err))
-    return { skippedActive: 0, submitted: 1, committed: 0, failed: 1, unknown: 0 }
   }
 }
 
@@ -512,27 +578,25 @@ export async function runAggregateSubmit({
 }) {
   console.log('\n-------AGGREGATE SUBMIT-------\n')
   const tracking = openTrackingDb(dir)
-  const limit = batchSize ?? AGGREGATE_SUBMIT_BATCH_SIZE
+  const limit = batchSize ?? AGGREGATE_PAGE_SIZE
 
   let submitted = 0
-  let skippedActive = 0
-  let recoveredFromPreviousRuns = 0
-  let unknownPostOutcomes = 0
+  let batches = 0
   let committed = 0
+  let recovered = 0
+  let alreadyActive = 0
   let failed = 0
-  let checked = 0
+  let unknown = 0
 
   try {
     const hasPlannedAggregates = tracking.listPlannedAggregatePieces(1).length > 0
-    const hasSubmittedAggregates = tracking.listSubmittingAggregatePieces(1).length > 0
+    const hasRecoverableAggregates = tracking.listRecoverableAggregatePieces(1).length > 0
     const hasUnsubmittedClaims = tracking.listUnsubmittedAggregateClaims(1).length > 0
-    const hasFailedWithTx = tracking.listFailedAggregatePieces(1, 0, true).length > 0
     const hasFailedAggregates = tracking.listFailedAggregatePieces(1).length > 0
     if (
       !hasPlannedAggregates &&
-      !hasSubmittedAggregates &&
+      !hasRecoverableAggregates &&
       !hasUnsubmittedClaims &&
-      !hasFailedWithTx &&
       (!retry || !hasFailedAggregates)
     ) {
       console.log(
@@ -564,53 +628,61 @@ export async function runAggregateSubmit({
       requestedDataSetId: dataSetId,
     })
 
-    const live = await dataSetLive(/** @type {any} */ (publicClient), { dataSetId: BigInt(dataSet.dataSetId) })
-    if (!live) throw new Error(`aggregate-submit: aggregate dataset ${dataSet.dataSetId} is not live`)
-
     const activePieces = dataSet.created ? new Map() : await listActivePieceMap(publicClient, dataSet.dataSetId)
 
-    const recoveredSubmitting = await recoverAggregateTransactions({
+    const recoveryResult = await recoverAggregateTransactions({
       tracking,
       publicClient,
       serviceUrl: resolvedServiceUrl,
       dataSetId: dataSet.dataSetId,
       activePieces,
-      listAggregates: (afterAggregateId) => tracking.listSubmittingAggregatePieces(limit, afterAggregateId),
-      progressLabel: 'Recovering submitted aggregate pieces',
+      listAggregates: (afterAggregateId) => tracking.listRecoverableAggregatePieces(limit, afterAggregateId),
+      progressLabel: 'Recovering aggregate transactions',
     })
-    checked += recoveredSubmitting.checked
-    committed += recoveredSubmitting.committed
-    failed += recoveredSubmitting.failed
-    recoveredFromPreviousRuns += recoveredSubmitting.committed
+    recovered += recoveryResult.committed
+    failed += recoveryResult.failed
 
-    const recoveredFailed = await recoverAggregateTransactions({
-      tracking,
-      publicClient,
-      serviceUrl: resolvedServiceUrl,
-      dataSetId: dataSet.dataSetId,
-      activePieces,
-      listAggregates: (afterAggregateId) => tracking.listFailedAggregatePieces(limit, afterAggregateId, true),
-      progressLabel: 'Recovering failed aggregate transactions',
-    })
-    checked += recoveredFailed.checked
-    committed += recoveredFailed.committed
-    failed += recoveredFailed.failed
-    recoveredFromPreviousRuns += recoveredFailed.committed
-
-    const unsubmitted = await resolveUnsubmittedClaims({
+    const orphaned = await reconcileOrphanedSubmissions({
       tracking,
       publicClient,
       dataSetId: dataSet.dataSetId,
       activePieces,
       limit,
     })
-    checked += unsubmitted.checked
-    committed += unsubmitted.committed
-    failed += unsubmitted.failed
-    unknownPostOutcomes += unsubmitted.unknown
+    recovered += orphaned.committed
+    unknown += orphaned.unknown
+
+    const renderSubmitProgress = (progressLabel) => {
+      renderProgressLine(
+        `${progressLabel}: submitted ${formatCount(submitted)}, committed ${formatCount(committed)}, failed ${formatCount(failed)}`,
+      )
+    }
 
     const processRows = async (listRows, progressLabel) => {
       let afterAggregateId = 0
+      /** @type {{ aggregateId: number, aggregatePieceCid: string, txHash: string | null, subPieces: string[] }[]} */
+      let batch = []
+
+      const flushBatch = async () => {
+        if (batch.length === 0) return
+
+        const result = await submitAggregateBatch({
+          tracking,
+          walletClient,
+          publicClient,
+          serviceUrl: resolvedServiceUrl,
+          dataSet,
+          activePieces,
+          aggregates: batch,
+        })
+        submitted += result.submitted
+        batches += result.addRequests
+        committed += result.committed
+        failed += result.failed
+        unknown += result.unknown
+        batch = []
+        renderSubmitProgress(progressLabel)
+      }
 
       while (true) {
         const aggregates = listRows(afterAggregateId)
@@ -620,29 +692,25 @@ export async function runAggregateSubmit({
           afterAggregateId = aggregate.aggregateId
           if (aggregate.txHash) continue
 
-          checked += 1
-          const result = await submitAggregate({
-            tracking,
-            walletClient,
-            publicClient,
-            serviceUrl: resolvedServiceUrl,
-            dataSet,
-            activePieces,
-            aggregate,
-          })
-          skippedActive += result.skippedActive
-          submitted += result.submitted
-          committed += result.committed
-          failed += result.failed
-          unknownPostOutcomes += result.unknown
+          const activePieceId = activePieces.get(aggregate.aggregatePieceCid)
+          if (activePieceId != null) {
+            tracking.markAggregateCommitted(
+              aggregate.aggregateId,
+              dataSet.dataSetId,
+              aggregate.txHash ?? 'already-active',
+              activePieceId,
+            )
+            alreadyActive += 1
+          } else {
+            batch.push({ ...aggregate, subPieces: listAllSubPieces(tracking, aggregate.aggregateId) })
+          }
 
-          renderProgressLine(
-            `${progressLabel}: checked ${formatCount(checked)}, submitted ${formatCount(
-              submitted,
-            )}, committed ${formatCount(committed)}, failed ${formatCount(failed)}`,
-          )
+          if (batch.length >= AGGREGATE_ADD_BATCH_SIZE) await flushBatch()
+          renderSubmitProgress(progressLabel)
         }
       }
+
+      await flushBatch()
     }
 
     await processRows(
@@ -661,16 +729,13 @@ export async function runAggregateSubmit({
     finishProgressLine()
   }
 
+  const total = committed + recovered + alreadyActive
   console.log('\nSUMMARY:')
-  console.log(`- Aggregate pieces checked: ${formatCount(checked)}`)
-  console.log(`- Aggregate add requests submitted: ${formatCount(submitted)}`)
-  if (skippedActive > 0) console.log(`- Aggregate pieces already active: ${formatCount(skippedActive)}`)
-  if (recoveredFromPreviousRuns > 0) {
-    console.log(`- Previous aggregate submissions recovered: ${formatCount(recoveredFromPreviousRuns)}`)
-  }
-  if (unknownPostOutcomes > 0) {
-    console.log(`- Aggregate pieces with unknown POST outcome: ${formatCount(unknownPostOutcomes)}`)
-  }
-  console.log(`- Aggregate pieces committed: ${formatCount(committed)}`)
-  if (failed > 0) console.log(`- Aggregate pieces failed: ${formatCount(failed)}`)
+  console.log(`- Submitted to provider: ${formatCount(submitted)} (in ${formatCount(batches)} batches)`)
+  console.log(`- Committed this run: ${formatCount(committed)}`)
+  if (recovered > 0) console.log(`- Recovered from previous runs: ${formatCount(recovered)}`)
+  if (alreadyActive > 0) console.log(`- Already active on-chain: ${formatCount(alreadyActive)}`)
+  console.log(`- Total pieces in dataset: ${formatCount(total)}`)
+  if (failed > 0) console.log(`- Failed: ${formatCount(failed)}`)
+  if (unknown > 0) console.log(`- Unknown POST outcome: ${formatCount(unknown)}`)
 }

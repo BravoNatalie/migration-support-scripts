@@ -558,7 +558,6 @@ export function openTrackingDb(dir) {
     SELECT aggregate_id, aggregate_piece_cid, data_set_id, tx_hash
     FROM aggregate_pieces
     WHERE status = ?
-      AND (? = 0 OR tx_hash IS NOT NULL)
       AND aggregate_id > ?
     ORDER BY aggregate_id
     LIMIT ?
@@ -569,6 +568,16 @@ export function openTrackingDb(dir) {
     FROM aggregate_pieces
     WHERE status = '${AGGREGATE_STATUS.submitting}'
       AND tx_hash IS NULL
+      AND aggregate_id > ?
+    ORDER BY aggregate_id
+    LIMIT ?
+  `)
+
+  const recoverableAggregatePiecesStmt = db.prepare(`
+    SELECT aggregate_id, aggregate_piece_cid, data_set_id, tx_hash
+    FROM aggregate_pieces
+    WHERE status IN ('${AGGREGATE_STATUS.submitting}', '${AGGREGATE_STATUS.failed}')
+      AND tx_hash IS NOT NULL
       AND aggregate_id > ?
     ORDER BY aggregate_id
     LIMIT ?
@@ -606,6 +615,15 @@ export function openTrackingDb(dir) {
         updated_at = ?
     WHERE aggregate_id = ?
       AND status IN ('${AGGREGATE_STATUS.planned}', '${AGGREGATE_STATUS.failed}')
+  `)
+
+  const recordAggregateSubmitTxStmt = db.prepare(`
+    UPDATE aggregate_pieces
+    SET data_set_id = ?,
+        tx_hash = ?,
+        updated_at = ?
+    WHERE aggregate_id = ?
+      AND status = '${AGGREGATE_STATUS.submitting}'
   `)
 
   const updateAggregateStatusStmt = db.prepare(`
@@ -682,6 +700,8 @@ export function openTrackingDb(dir) {
 
   const clearFailureStmt = db.prepare(`DELETE FROM failures WHERE stage = ? AND shard_cid = ?`)
 
+  const countShardsStmt = db.prepare(`SELECT COUNT(*) AS n FROM shards`)
+
   const statsStmt = db.prepare(`
     SELECT
       COUNT(*) AS total,
@@ -702,7 +722,7 @@ export function openTrackingDb(dir) {
    * @param {string | null} [update.pieceId]
    * @param {string | null} [update.lastError]
    */
-  const updateAggregateStatus = ({
+  const runUpdateAggregateStatus = ({
     aggregateId,
     status,
     dataSetId = null,
@@ -719,12 +739,9 @@ export function openTrackingDb(dir) {
    * @param {string} status
    * @param {number} limit
    * @param {number} afterAggregateId
-   * @param {boolean} requireTxHash
    */
-  const listAggregatePiecesByStatus = (status, limit, afterAggregateId, requireTxHash = false) => {
-    return aggregatePiecesByStatusStmt
-      .all(status, requireTxHash ? 1 : 0, afterAggregateId, limit)
-      .map(mapAggregatePieceRow)
+  const listAggregatePiecesByStatus = (status, limit, afterAggregateId) => {
+    return aggregatePiecesByStatusStmt.all(status, afterAggregateId, limit).map(mapAggregatePieceRow)
   }
 
   return {
@@ -1003,17 +1020,6 @@ export function openTrackingDb(dir) {
     },
 
     /**
-     * List aggregate pieces with submitted transactions that still need polling.
-     *
-     * @param {number} limit
-     * @param {number} afterAggregateId
-     * @returns {PlannedAggregatePiece[]}
-     */
-    listSubmittingAggregatePieces(limit, afterAggregateId = 0) {
-      return listAggregatePiecesByStatus(AGGREGATE_STATUS.submitting, limit, afterAggregateId, true)
-    },
-
-    /**
      * List aggregate rows claimed before a tx hash was persisted.
      *
      * @param {number} limit
@@ -1025,15 +1031,26 @@ export function openTrackingDb(dir) {
     },
 
     /**
+     * List submitting and failed aggregate pieces that have a tx hash, for
+     * recovery polling on resume.
+     *
+     * @param {number} limit
+     * @param {number} afterAggregateId
+     * @returns {PlannedAggregatePiece[]}
+     */
+    listRecoverableAggregatePieces(limit, afterAggregateId = 0) {
+      return recoverableAggregatePiecesStmt.all(afterAggregateId, limit).map(mapAggregatePieceRow)
+    },
+
+    /**
      * List failed aggregate pieces with stable keyset pagination.
      *
      * @param {number} limit
      * @param {number} afterAggregateId
-     * @param {boolean} requireTxHash
      * @returns {PlannedAggregatePiece[]}
      */
-    listFailedAggregatePieces(limit, afterAggregateId = 0, requireTxHash = false) {
-      return listAggregatePiecesByStatus(AGGREGATE_STATUS.failed, limit, afterAggregateId, requireTxHash)
+    listFailedAggregatePieces(limit, afterAggregateId = 0) {
+      return listAggregatePiecesByStatus(AGGREGATE_STATUS.failed, limit, afterAggregateId)
     },
 
     /** Return the aggregate dataset ids currently attached to aggregate rows. */
@@ -1071,21 +1088,19 @@ export function openTrackingDb(dir) {
      * @param {string | null} [update.lastError]
      */
     updateAggregateStatus(update) {
-      return updateAggregateStatus(update)
+      return runUpdateAggregateStatus(update)
     },
 
     /**
+     * Record the provider transaction returned after a claimed aggregate add POST.
+     * The status transition to submitting is owned by claimAggregatePiece().
+     *
      * @param {number} aggregateId
      * @param {number} dataSetId
      * @param {string} txHash
      */
-    markAggregateSubmitting(aggregateId, dataSetId, txHash) {
-      return updateAggregateStatus({
-        aggregateId,
-        status: AGGREGATE_STATUS.submitting,
-        dataSetId,
-        txHash,
-      })
+    recordAggregateSubmitTx(aggregateId, dataSetId, txHash) {
+      return Number(recordAggregateSubmitTxStmt.run(dataSetId, txHash, now(), aggregateId).changes || 0) === 1
     },
 
     /**
@@ -1095,7 +1110,7 @@ export function openTrackingDb(dir) {
      * @param {bigint | number | string} pieceId
      */
     markAggregateCommitted(aggregateId, dataSetId, txHash, pieceId) {
-      return updateAggregateStatus({
+      return runUpdateAggregateStatus({
         aggregateId,
         status: AGGREGATE_STATUS.committed,
         dataSetId,
@@ -1109,7 +1124,7 @@ export function openTrackingDb(dir) {
      * @param {string} error
      */
     markAggregateFailed(aggregateId, error) {
-      return updateAggregateStatus({
+      return runUpdateAggregateStatus({
         aggregateId,
         status: AGGREGATE_STATUS.failed,
         lastError: error,
@@ -1239,6 +1254,10 @@ export function openTrackingDb(dir) {
      */
     clearPrepareFailure(shardCid) {
       clearFailureStmt.run(FAILURE_STAGE.prepare, shardCid)
+    },
+
+    countShards() {
+      return Number(countShardsStmt.get().n || 0)
     },
 
     getDownloadStats() {

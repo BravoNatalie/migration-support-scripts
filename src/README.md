@@ -58,7 +58,11 @@ If `--foc-api-url` is provided, missing roots are enriched with indexed on-chain
 
 Run this after `commit` has finished for the source data set. The command reads committed PieceCIDs that are not already present in `aggregate_sub_pieces`, derives piece sizes from the PieceCID, then greedily packs those pieces into aggregate groups capped by padded size. It stores planned aggregate roots and ordered sub-pieces back into `tracking.db`. It does not read CAR files or write aggregate CAR bytes.
 
-The final summary reports how many committed PieceCIDs are still not represented in aggregate plan tables. `fullyMapped=true` means `unplannedAfter=0` for this output directory.
+The final summary reports how many committed PieceCIDs are still not represented in aggregate plan tables. `Fully mapped: yes` means all committed pieces in this output directory are represented in aggregate plan tables.
+
+* **`aggregate-submit`** — Creates or reuses the aggregate data set and submits planned aggregate roots with their ordered sub-pieces.
+
+Run this after `aggregate-plan`. The command signs AddPieces authorization for the top-level aggregate PieceCID only, then posts a custom provider request where `pieceCid` is the aggregate root and `subPieces[]` is the ordered member list from `aggregate_sub_pieces`. It stores progress on `aggregate_pieces` using `data_set_id`, `status`, `tx_hash`, `piece_id`, `attempts`, and `last_error`.
 
 ## End-to-end workflow
 
@@ -114,23 +118,40 @@ node src/index.mjs aggregate-plan \
 The command prints a final summary like:
 
 ```text
-Aggregate plan complete
+SUMMARY:
 - Committed pieces to aggregate: 9,638
 - Pieces aggregated in this run: 9,638
 - Aggregate pieces created: 42
 - Total padded size planned in this run: 297.42 GiB
-- Aggregate size limit: 32.00 GiB
 - Fully mapped: yes
 ```
 
 Use `Fully mapped: yes` as the quick completion check. If it is `no`, the summary includes `Pieces still not aggregated` with the number of committed pieces still missing from the aggregate plan tables. Rerun the same command to continue after an interruption. Do not change `--max-size-bytes` for a retry unless you intend to use a different packing size for pieces that have not been planned yet.
+
+## Aggregate submit workflow
+
+Use this after `aggregate-plan` has created aggregate rows. The private key signs dataset creation and AddPieces authorizations; it does not need to match the source migration client wallet. `--service-url` and `--provider-address` can be omitted when `migration_metadata` already has the source migration values.
+
+```sh
+node src/index.mjs aggregate-submit \
+  --dir <output-dir> \
+  --private-key 0x... \
+  [--data-set-id N] \
+  [--retry] \
+  [--service-url https://...] \
+  [--provider-address 0x...] \
+  [--network mainnet|calibration] \
+  [--batch-size N]
+```
+
+On the first run, the command creates the aggregate data set and writes its `data_set_id` onto planned aggregate rows. Use `--data-set-id` to recover from a crash after dataset creation but before the id was saved. On rerun, the command reuses the recorded data set, polls previous submitted transactions, checks whether claimed rows already landed, skips aggregate roots already active in the data set, and then submits remaining planned rows. Failed rows can be resubmitted with `--retry`. Claimed rows without a saved transaction hash are treated as unknown POST outcomes: they are reconciled against active pieces but not resubmitted by `--retry`.
 
 ## Final Output layout
 
 ```text
 <dir>/
   manifest.aria2          # one entry per unique shard_cid across all spaces
-  tracking.db             # SQLite: shards + root_shards + download/prepare/commit state
+  tracking.db             # SQLite: shards + root_shards + aggregate plan/submit state
   verify-report.json      # written by verify with inventory, piece, and root results
   aria2.session           # written by aria2 during downloads
   shards/
@@ -157,3 +178,4 @@ Use `Fully mapped: yes` as the quick completion check. If it is `no`, the summar
 * **Run `verify` only after commit is finalized.** The command is a final correctness check, not a progress monitor. If commit rows are still pending, parked, committing, or failed, the verification state will be `incomplete`.
 * **`verify --foc-api-url` is diagnostic.** The base verification does not require foc-observer. Use the option when missing roots need on-chain context in `verify-report.json`.
 * **`aggregate-plan` is a planner.** It computes aggregate roots and member order from committed PieceCIDs in `tracking.db`, then stores the plan in aggregate tables. It assumes `prepare` and `commit` already validated and committed the sub-pieces. Retry with the same aggregate size; changing the size only affects unplanned pieces and can leave mixed packing sizes in the database.
+* **`aggregate-submit` commits aggregate roots, not sub-pieces.** It signs the aggregate root PieceCID and sends ordered sub-pieces only in the provider request body. If the provider recomputes a different aggregate root from those sub-pieces, the add request fails and the row is marked `failed`.

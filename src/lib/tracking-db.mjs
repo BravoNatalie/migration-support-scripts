@@ -109,6 +109,8 @@ const AGGREGATE_STATUS = {
  * @typedef {object} PlannedAggregatePiece
  * @property {number} aggregateId
  * @property {string} aggregatePieceCid
+ * @property {number | null} dataSetId
+ * @property {string | null} txHash
  */
 
 /**
@@ -119,6 +121,19 @@ const AGGREGATE_STATUS = {
 
 function now() {
   return Date.now()
+}
+
+/**
+ * @param {any} row
+ * @returns {PlannedAggregatePiece}
+ */
+function mapAggregatePieceRow(row) {
+  return {
+    aggregateId: Number(row.aggregate_id),
+    aggregatePieceCid: row.aggregate_piece_cid.toString(),
+    dataSetId: row.data_set_id != null ? Number(row.data_set_id) : null,
+    txHash: row.tx_hash?.toString() ?? null,
+  }
 }
 
 /**
@@ -539,10 +554,21 @@ export function openTrackingDb(dir) {
     VALUES (?, ?, ?)
   `)
 
-  const plannedAggregatePiecesStmt = db.prepare(`
-    SELECT aggregate_id, aggregate_piece_cid
+  const aggregatePiecesByStatusStmt = db.prepare(`
+    SELECT aggregate_id, aggregate_piece_cid, data_set_id, tx_hash
     FROM aggregate_pieces
-    WHERE status = '${AGGREGATE_STATUS.planned}'
+    WHERE status = ?
+      AND (? = 0 OR tx_hash IS NOT NULL)
+      AND aggregate_id > ?
+    ORDER BY aggregate_id
+    LIMIT ?
+  `)
+
+  const unsubmittedAggregateClaimsStmt = db.prepare(`
+    SELECT aggregate_id, aggregate_piece_cid, data_set_id, tx_hash
+    FROM aggregate_pieces
+    WHERE status = '${AGGREGATE_STATUS.submitting}'
+      AND tx_hash IS NULL
       AND aggregate_id > ?
     ORDER BY aggregate_id
     LIMIT ?
@@ -555,6 +581,42 @@ export function openTrackingDb(dir) {
       AND position > ?
     ORDER BY position
     LIMIT ?
+  `)
+
+  const aggregateDataSetIdsStmt = db.prepare(`
+    SELECT DISTINCT data_set_id
+    FROM aggregate_pieces
+    WHERE data_set_id IS NOT NULL
+    ORDER BY data_set_id
+  `)
+
+  const assignAggregateDataSetStmt = db.prepare(`
+    UPDATE aggregate_pieces
+    SET data_set_id = ?,
+        updated_at = ?
+    WHERE data_set_id IS NULL
+      AND status IN ('${AGGREGATE_STATUS.planned}', '${AGGREGATE_STATUS.failed}')
+  `)
+
+  const claimAggregatePieceStmt = db.prepare(`
+    UPDATE aggregate_pieces
+    SET status = '${AGGREGATE_STATUS.submitting}',
+        attempts = attempts + 1,
+        last_error = NULL,
+        updated_at = ?
+    WHERE aggregate_id = ?
+      AND status IN ('${AGGREGATE_STATUS.planned}', '${AGGREGATE_STATUS.failed}')
+  `)
+
+  const updateAggregateStatusStmt = db.prepare(`
+    UPDATE aggregate_pieces
+    SET status = ?,
+        data_set_id = COALESCE(?, data_set_id),
+        tx_hash = COALESCE(?, tx_hash),
+        piece_id = COALESCE(?, piece_id),
+        last_error = ?,
+        updated_at = ?
+    WHERE aggregate_id = ?
   `)
 
   const claimCommitCandidatesStmt = db.prepare(`
@@ -630,6 +692,40 @@ export function openTrackingDb(dir) {
       SUM(CASE WHEN download_status = '${DOWNLOAD_STATUS.error}' THEN 1 ELSE 0 END) AS error
     FROM shards
   `)
+
+  /**
+   * @param {object} update
+   * @param {number} update.aggregateId
+   * @param {string} update.status
+   * @param {number | null} [update.dataSetId]
+   * @param {string | null} [update.txHash]
+   * @param {string | null} [update.pieceId]
+   * @param {string | null} [update.lastError]
+   */
+  const updateAggregateStatus = ({
+    aggregateId,
+    status,
+    dataSetId = null,
+    txHash = null,
+    pieceId = null,
+    lastError = null,
+  }) => {
+    return Number(
+      updateAggregateStatusStmt.run(status, dataSetId, txHash, pieceId, lastError, now(), aggregateId).changes || 0,
+    )
+  }
+
+  /**
+   * @param {string} status
+   * @param {number} limit
+   * @param {number} afterAggregateId
+   * @param {boolean} requireTxHash
+   */
+  const listAggregatePiecesByStatus = (status, limit, afterAggregateId, requireTxHash = false) => {
+    return aggregatePiecesByStatusStmt
+      .all(status, requireTxHash ? 1 : 0, afterAggregateId, limit)
+      .map(mapAggregatePieceRow)
+  }
 
   return {
     DOWNLOAD_STATUS,
@@ -903,10 +999,121 @@ export function openTrackingDb(dir) {
      * @returns {PlannedAggregatePiece[]}
      */
     listPlannedAggregatePieces(limit, afterAggregateId = 0) {
-      return plannedAggregatePiecesStmt.all(afterAggregateId, limit).map((row) => ({
-        aggregateId: Number(row.aggregate_id),
-        aggregatePieceCid: row.aggregate_piece_cid.toString(),
-      }))
+      return listAggregatePiecesByStatus(AGGREGATE_STATUS.planned, limit, afterAggregateId)
+    },
+
+    /**
+     * List aggregate pieces with submitted transactions that still need polling.
+     *
+     * @param {number} limit
+     * @param {number} afterAggregateId
+     * @returns {PlannedAggregatePiece[]}
+     */
+    listSubmittingAggregatePieces(limit, afterAggregateId = 0) {
+      return listAggregatePiecesByStatus(AGGREGATE_STATUS.submitting, limit, afterAggregateId, true)
+    },
+
+    /**
+     * List aggregate rows claimed before a tx hash was persisted.
+     *
+     * @param {number} limit
+     * @param {number} afterAggregateId
+     * @returns {PlannedAggregatePiece[]}
+     */
+    listUnsubmittedAggregateClaims(limit, afterAggregateId = 0) {
+      return unsubmittedAggregateClaimsStmt.all(afterAggregateId, limit).map(mapAggregatePieceRow)
+    },
+
+    /**
+     * List failed aggregate pieces with stable keyset pagination.
+     *
+     * @param {number} limit
+     * @param {number} afterAggregateId
+     * @param {boolean} requireTxHash
+     * @returns {PlannedAggregatePiece[]}
+     */
+    listFailedAggregatePieces(limit, afterAggregateId = 0, requireTxHash = false) {
+      return listAggregatePiecesByStatus(AGGREGATE_STATUS.failed, limit, afterAggregateId, requireTxHash)
+    },
+
+    /** Return the aggregate dataset ids currently attached to aggregate rows. */
+    listAggregateDataSetIds() {
+      return aggregateDataSetIdsStmt.all().map((row) => Number(row.data_set_id))
+    },
+
+    /**
+     * Attach a dataset id to aggregate rows that have not been assigned yet.
+     *
+     * @param {number} dataSetId
+     */
+    assignAggregateDataSetId(dataSetId) {
+      return Number(assignAggregateDataSetStmt.run(dataSetId, now()).changes || 0)
+    },
+
+    /**
+     * Claim one aggregate row before submitting it to the provider.
+     *
+     * @param {number} aggregateId
+     */
+    claimAggregatePiece(aggregateId) {
+      return Number(claimAggregatePieceStmt.run(now(), aggregateId).changes || 0) === 1
+    },
+
+    /**
+     * Update aggregate row status and optional status-specific fields.
+     *
+     * @param {object} update
+     * @param {number} update.aggregateId
+     * @param {string} update.status
+     * @param {number | null} [update.dataSetId]
+     * @param {string | null} [update.txHash]
+     * @param {string | null} [update.pieceId]
+     * @param {string | null} [update.lastError]
+     */
+    updateAggregateStatus(update) {
+      return updateAggregateStatus(update)
+    },
+
+    /**
+     * @param {number} aggregateId
+     * @param {number} dataSetId
+     * @param {string} txHash
+     */
+    markAggregateSubmitting(aggregateId, dataSetId, txHash) {
+      return updateAggregateStatus({
+        aggregateId,
+        status: AGGREGATE_STATUS.submitting,
+        dataSetId,
+        txHash,
+      })
+    },
+
+    /**
+     * @param {number} aggregateId
+     * @param {number} dataSetId
+     * @param {string} txHash
+     * @param {bigint | number | string} pieceId
+     */
+    markAggregateCommitted(aggregateId, dataSetId, txHash, pieceId) {
+      return updateAggregateStatus({
+        aggregateId,
+        status: AGGREGATE_STATUS.committed,
+        dataSetId,
+        txHash,
+        pieceId: pieceId.toString(),
+      })
+    },
+
+    /**
+     * @param {number} aggregateId
+     * @param {string} error
+     */
+    markAggregateFailed(aggregateId, error) {
+      return updateAggregateStatus({
+        aggregateId,
+        status: AGGREGATE_STATUS.failed,
+        lastError: error,
+      })
     },
 
     /**

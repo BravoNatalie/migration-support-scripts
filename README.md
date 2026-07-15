@@ -4,8 +4,9 @@ CLI tooling for running Storacha backup migration work from a FOC Node.
 
 The CLI owns the backup workflow: creating local tracking state, downloading
 shard CARs, preparing piece CARs, committing pieces, and verifying on-chain
-state. It also has an aggregate planner that stores aggregate roots and ordered
-sub-piece members in `tracking.db` after the source data set is fully committed.
+state. It also has aggregate planning and submission commands that store
+aggregate roots, ordered sub-piece members, and aggregate commit progress in
+`tracking.db` after the source data set is fully committed.
 
 ## Current CLI
 

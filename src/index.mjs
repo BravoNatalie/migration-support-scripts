@@ -13,6 +13,7 @@
  *             [--network mainnet|calibration] [--concurrency N] [--retry]
  *   verify    --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N]
  *   aggregate-plan --dir <output-dir> [--max-size-bytes N]
+ *   aggregate-submit --dir <output-dir> --private-key 0x... [--data-set-id N] [--retry] [--service-url https://...] [--provider-address 0x...] [--network mainnet|calibration] [--batch-size N]
  */
 
 import fs from 'node:fs'
@@ -22,6 +23,7 @@ import { parseArgs } from 'node:util'
 import { calibration, mainnet } from '@filoz/synapse-core/chains'
 import { isAddress } from 'viem/utils'
 import { parsePositiveBigInt, runAggregatePlan } from './commands/aggregate-plan.mjs'
+import { runAggregateSubmit } from './commands/aggregate-submit.mjs'
 import { runCommit } from './commands/commit.mjs'
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
@@ -37,7 +39,8 @@ function usage() {
   backup-helper prepare  --dir <output-dir> [--concurrency N]
   backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
   backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]
-  backup-helper aggregate-plan --dir <output-dir> [--max-size-bytes N]`)
+  backup-helper aggregate-plan --dir <output-dir> [--max-size-bytes N]
+  backup-helper aggregate-submit --dir <output-dir> --private-key 0x... [--data-set-id N] [--retry] [--service-url https://...] [--provider-address 0x...] [--network mainnet|calibration] [--batch-size N]`)
 }
 
 /**
@@ -143,6 +146,37 @@ function parseAddress(value, optionName) {
   }
 
   return value
+}
+
+/**
+ * @param {string | undefined} value
+ * @param {string} command
+ * @param {string} optionName
+ */
+function parsePrivateKey(value, command, optionName) {
+  if (!value || !/^0x[0-9a-fA-F]{64}$/.test(value)) {
+    console.error(`Error: ${command}: ${optionName} must be a 32-byte hex private key`)
+    process.exit(1)
+  }
+
+  return /** @type {`0x${string}`} */ (value)
+}
+
+/**
+ * @param {string | undefined} value
+ * @param {string} command
+ * @param {string} optionName
+ */
+function parseOptionalPositiveInteger(value, command, optionName) {
+  if (value == null || value === '') return undefined
+
+  const n = Number(value)
+  if (!Number.isSafeInteger(n) || n < 1) {
+    console.error(`Error: ${command}: ${optionName} must be a positive integer (got ${value})`)
+    process.exit(1)
+  }
+
+  return n
 }
 
 async function create(argv) {
@@ -264,23 +298,13 @@ async function commit(argv) {
     process.exit(1)
   }
 
-  if (!values['session-key']) {
-    console.error('Error: commit: missing required --session-key <0x...> argument')
-    process.exit(1)
-  }
   if (!values.target) {
     console.error('Error: commit: missing required --target <path> argument')
     process.exit(1)
   }
 
-  const sessionKey = values['session-key']
-  if (!/^0x[0-9a-fA-F]{64}$/.test(sessionKey)) {
-    console.error('commit: --session-key must be a 32-byte hex private key')
-    process.exit(1)
-  }
-
   await runCommit({
-    sessionKey,
+    sessionKey: parsePrivateKey(values['session-key'], 'commit', '--session-key'),
     dir: requireDir(values.dir, 'commit'),
     serviceUrl: requireServiceUrl(values['service-url']),
     providerAddress: parseAddress(values['provider-address'], '--provider-address'),
@@ -317,11 +341,6 @@ async function removePieces(argv) {
     process.exit(1)
   }
 
-  const sessionKey = values['session-key']
-  if (!sessionKey || !/^0x[0-9a-fA-F]{64}$/.test(sessionKey)) {
-    console.error('remove-pieces: --session-key must be a 32-byte hex private key')
-    process.exit(1)
-  }
   if (!values['ids-file']) {
     console.error('Error: remove-pieces: missing required --ids-file <path> argument')
     process.exit(1)
@@ -331,7 +350,7 @@ async function removePieces(argv) {
     dir: requireDir(values.dir, 'remove-pieces'),
     serviceUrl: requireServiceUrl(values['service-url']),
     customerWallet: parseAddress(values['customer-wallet'], '--customer-wallet'),
-    sessionKey: /** @type {`0x${string}`} */ (sessionKey),
+    sessionKey: parsePrivateKey(values['session-key'], 'remove-pieces', '--session-key'),
     chain: parseCommitNetwork(values.network),
     idsFile: values['ids-file'],
     limit: values.limit != null ? Number(values.limit) : undefined,
@@ -368,6 +387,43 @@ async function aggregatePlan(argv) {
   await runAggregatePlan({
     dir: requireDir(values.dir, 'aggregate-plan'),
     maxSizeBytes,
+  })
+}
+
+async function aggregateSubmit(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        dir: { type: 'string' },
+        'private-key': { type: 'string' },
+        'service-url': { type: 'string' },
+        'provider-address': { type: 'string' },
+        network: { type: 'string' },
+        'batch-size': { type: 'string' },
+        'data-set-id': { type: 'string' },
+        retry: { type: 'boolean' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  await runAggregateSubmit({
+    dir: requireDir(values.dir, 'aggregate-submit'),
+    privateKey: parsePrivateKey(values['private-key'], 'aggregate-submit', '--private-key'),
+    chain: parseCommitNetwork(values.network),
+    serviceUrl: values['service-url'] ? requireServiceUrl(values['service-url']) : undefined,
+    providerAddress: values['provider-address']
+      ? parseAddress(values['provider-address'], '--provider-address')
+      : undefined,
+    batchSize: parseConcurrency(values['batch-size'], 'aggregate-submit'),
+    dataSetId: parseOptionalPositiveInteger(values['data-set-id'], 'aggregate-submit', '--data-set-id'),
+    retry: values.retry === true,
   })
 }
 
@@ -462,6 +518,9 @@ async function main() {
       break
     case 'aggregate-plan':
       await aggregatePlan(rest)
+      break
+    case 'aggregate-submit':
+      await aggregateSubmit(rest)
       break
     default:
       usage()

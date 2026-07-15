@@ -38,6 +38,13 @@ const MIGRATION_STATE = {
   failed: 'failed',
 }
 
+const AGGREGATE_STATUS = {
+  planned: 'planned',
+  submitting: 'submitting',
+  committed: 'committed',
+  failed: 'failed',
+}
+
 /**
  * @typedef {object} ShardForManifest
  * @property {string} shardCid
@@ -89,6 +96,25 @@ const MIGRATION_STATE = {
  * @property {bigint | null} clientDataSetId
  * @property {string} state
  * @property {number} updatedAt
+ */
+
+/**
+ * @typedef {object} AggregatePiecePlan
+ * @property {string} aggregatePieceCid
+ * @property {bigint | number} aggregateUsedBytes
+ * @property {string[]} subPieceCids
+ */
+
+/**
+ * @typedef {object} PlannedAggregatePiece
+ * @property {number} aggregateId
+ * @property {string} aggregatePieceCid
+ */
+
+/**
+ * @typedef {object} AggregateSubPieceRow
+ * @property {number} position
+ * @property {string} subPieceCid
  */
 
 function now() {
@@ -168,6 +194,40 @@ export function openTrackingDb(dir) {
 
     CREATE INDEX IF NOT EXISTS idx_failures_shard
       ON failures(shard_cid);
+
+    CREATE TABLE IF NOT EXISTS aggregate_pieces (
+      aggregate_id        INTEGER PRIMARY KEY,
+      data_set_id         INTEGER,
+      aggregate_piece_cid TEXT NOT NULL,
+      aggregate_used_bytes INTEGER NOT NULL,
+      status              TEXT NOT NULL DEFAULT 'planned',
+      tx_hash             TEXT,
+      piece_id            TEXT,
+      last_error          TEXT,
+      attempts            INTEGER NOT NULL DEFAULT 0,
+      created_at          INTEGER NOT NULL,
+      updated_at          INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS aggregate_sub_pieces (
+      aggregate_id  INTEGER NOT NULL,
+      position      INTEGER NOT NULL,
+      sub_piece_cid TEXT NOT NULL,
+      PRIMARY KEY (aggregate_id, position),
+      FOREIGN KEY (aggregate_id)
+        REFERENCES aggregate_pieces(aggregate_id)
+        ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_aggregate_pieces_planned_cid
+      ON aggregate_pieces(aggregate_piece_cid)
+      WHERE data_set_id IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_aggregate_pieces_status
+      ON aggregate_pieces(status, aggregate_id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_aggregate_sub_pieces_cid
+      ON aggregate_sub_pieces(sub_piece_cid);
   `)
 
   if (!hasColumn(db, 'root_shards', 'piece_cid')) {
@@ -410,6 +470,41 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
+  const unplannedCommittedPieceCidsStmt = db.prepare(`
+    SELECT DISTINCT r.piece_cid
+    FROM root_shards AS r
+    LEFT JOIN aggregate_sub_pieces AS a
+      ON a.sub_piece_cid = r.piece_cid
+    WHERE r.commit_status = '${COMMIT_STATUS.committed}'
+      AND r.piece_cid IS NOT NULL
+      AND r.piece_cid > ?
+      AND a.sub_piece_cid IS NULL
+    ORDER BY r.piece_cid
+    LIMIT ?
+  `)
+
+  const committedPieceCidCountStmt = db.prepare(`
+    SELECT COUNT(DISTINCT piece_cid) AS n
+    FROM root_shards
+    WHERE commit_status = '${COMMIT_STATUS.committed}'
+      AND piece_cid IS NOT NULL
+  `)
+
+  const aggregateSubPieceCountStmt = db.prepare(`
+    SELECT COUNT(DISTINCT sub_piece_cid) AS n
+    FROM aggregate_sub_pieces
+  `)
+
+  const unplannedCommittedPieceCidCountStmt = db.prepare(`
+    SELECT COUNT(DISTINCT r.piece_cid) AS n
+    FROM root_shards AS r
+    LEFT JOIN aggregate_sub_pieces AS a
+      ON a.sub_piece_cid = r.piece_cid
+    WHERE r.commit_status = '${COMMIT_STATUS.committed}'
+      AND r.piece_cid IS NOT NULL
+      AND a.sub_piece_cid IS NULL
+  `)
+
   const committedRootCidsStmt = db.prepare(`
     SELECT DISTINCT root_cid
     FROM root_shards
@@ -426,6 +521,40 @@ export function openTrackingDb(dir) {
       AND commit_status = '${COMMIT_STATUS.committed}'
       AND piece_cid IS NOT NULL
     ORDER BY piece_cid
+  `)
+
+  const insertAggregatePieceStmt = db.prepare(`
+    INSERT INTO aggregate_pieces (
+      aggregate_piece_cid,
+      aggregate_used_bytes,
+      status,
+      created_at,
+      updated_at
+    )
+    VALUES (?, ?, '${AGGREGATE_STATUS.planned}', ?, ?)
+  `)
+
+  const insertAggregateSubPieceStmt = db.prepare(`
+    INSERT INTO aggregate_sub_pieces (aggregate_id, position, sub_piece_cid)
+    VALUES (?, ?, ?)
+  `)
+
+  const plannedAggregatePiecesStmt = db.prepare(`
+    SELECT aggregate_id, aggregate_piece_cid
+    FROM aggregate_pieces
+    WHERE status = '${AGGREGATE_STATUS.planned}'
+      AND aggregate_id > ?
+    ORDER BY aggregate_id
+    LIMIT ?
+  `)
+
+  const aggregateSubPiecesStmt = db.prepare(`
+    SELECT position, sub_piece_cid
+    FROM aggregate_sub_pieces
+    WHERE aggregate_id = ?
+      AND position > ?
+    ORDER BY position
+    LIMIT ?
   `)
 
   const claimCommitCandidatesStmt = db.prepare(`
@@ -505,6 +634,7 @@ export function openTrackingDb(dir) {
   return {
     DOWNLOAD_STATUS,
     MIGRATION_STATE,
+    AGGREGATE_STATUS,
 
     /**
      * Bulk-load shard rows from an iterator. Wraps the load in a single
@@ -688,6 +818,32 @@ export function openTrackingDb(dir) {
     },
 
     /**
+     * List committed piece CIDs that are not already members of any aggregate plan.
+     *
+     * @param {number} limit
+     * @param {string} afterPieceCid
+     * @returns {string[]}
+     */
+    listUnplannedCommittedPieceCids(limit, afterPieceCid) {
+      return unplannedCommittedPieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid.toString())
+    },
+
+    /** Count distinct committed piece CIDs. */
+    countCommittedPieceCids() {
+      return Number(committedPieceCidCountStmt.get().n || 0)
+    },
+
+    /** Count distinct sub-piece CIDs already present in aggregate plans. */
+    countAggregateSubPieceCids() {
+      return Number(aggregateSubPieceCountStmt.get().n || 0)
+    },
+
+    /** Count committed piece CIDs that are not present in aggregate plans yet. */
+    countUnplannedCommittedPieceCids() {
+      return Number(unplannedCommittedPieceCidCountStmt.get().n || 0)
+    },
+
+    /**
      * List one stable keyset-paginated batch of distinct committed root CIDs.
      *
      * @param {number} limit
@@ -708,6 +864,63 @@ export function openTrackingDb(dir) {
       return committedPiecesByRootStmt.all(rootCid).map((row) => ({
         pieceCid: row.piece_cid.toString(),
         txHash: row.tx_hash?.toString() ?? null,
+      }))
+    },
+
+    /**
+     * Insert one planned aggregate piece and its ordered sub-pieces.
+     *
+     * @param {AggregatePiecePlan} plan
+     * @returns {number} aggregate_id
+     */
+    insertAggregatePiecePlan({ aggregatePieceCid, aggregateUsedBytes, subPieceCids }) {
+      const usedBytes = Number(aggregateUsedBytes)
+      if (!Number.isSafeInteger(usedBytes) || usedBytes < 1) {
+        throw new Error(`aggregate used bytes must be a positive safe integer: ${aggregateUsedBytes}`)
+      }
+
+      const timestamp = now()
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        const result = insertAggregatePieceStmt.run(aggregatePieceCid, usedBytes, timestamp, timestamp)
+        const aggregateId = Number(result.lastInsertRowid)
+        for (const [position, subPieceCid] of subPieceCids.entries()) {
+          insertAggregateSubPieceStmt.run(aggregateId, position, subPieceCid)
+        }
+        db.exec('COMMIT')
+        return aggregateId
+      } catch (err) {
+        db.exec('ROLLBACK')
+        throw err
+      }
+    },
+
+    /**
+     * List planned aggregate pieces with stable keyset pagination.
+     *
+     * @param {number} limit
+     * @param {number} afterAggregateId
+     * @returns {PlannedAggregatePiece[]}
+     */
+    listPlannedAggregatePieces(limit, afterAggregateId = 0) {
+      return plannedAggregatePiecesStmt.all(afterAggregateId, limit).map((row) => ({
+        aggregateId: Number(row.aggregate_id),
+        aggregatePieceCid: row.aggregate_piece_cid.toString(),
+      }))
+    },
+
+    /**
+     * List ordered sub-pieces for an aggregate with stable keyset pagination.
+     *
+     * @param {number} aggregateId
+     * @param {number} limit
+     * @param {number} afterPosition
+     * @returns {AggregateSubPieceRow[]}
+     */
+    listAggregateSubPieces(aggregateId, limit, afterPosition = -1) {
+      return aggregateSubPiecesStmt.all(aggregateId, afterPosition, limit).map((row) => ({
+        position: Number(row.position),
+        subPieceCid: row.sub_piece_cid.toString(),
       }))
     },
 

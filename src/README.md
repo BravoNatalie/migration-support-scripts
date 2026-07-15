@@ -54,6 +54,12 @@ The command checks that the input inventory is covered by `tracking.db`, the PDP
 
 If `--foc-api-url` is provided, missing roots are enriched with indexed on-chain metadata from foc-observer. This helps distinguish roots that were committed on-chain but are not served by the provider from roots whose commit metadata is missing or points at a different IPFS root CID.
 
+* **`aggregate-plan`** — Plans aggregate PieceCID submissions from committed pieces in `tracking.db`.
+
+Run this after `commit` has finished for the source data set. The command reads committed PieceCIDs that are not already present in `aggregate_sub_pieces`, derives piece sizes from the PieceCID, then greedily packs those pieces into aggregate groups capped by padded size. It stores planned aggregate roots and ordered sub-pieces back into `tracking.db`. It does not read CAR files or write aggregate CAR bytes.
+
+The final summary reports how many committed PieceCIDs are still not represented in aggregate plan tables. `fullyMapped=true` means `unplannedAfter=0` for this output directory.
+
 ## End-to-end workflow
 
 ```sh
@@ -95,6 +101,30 @@ node src/index.mjs verify \
   [--foc-api-url https://...]
 ```
 
+## Aggregate planning workflow
+
+Use this after `commit` has finalized the source data set and the SP needs aggregate submission plans capped at 32 GiB padded size by default. The command is retryable when rerun with the same `--max-size-bytes`: already planned sub-pieces are skipped, and newly committed unplanned pieces keep being inserted.
+
+```sh
+node src/index.mjs aggregate-plan \
+  --dir <output-dir> \
+  [--max-size-bytes 34359738368]
+```
+
+The command prints a final summary like:
+
+```text
+Aggregate plan complete
+- Committed pieces to aggregate: 9,638
+- Pieces aggregated in this run: 9,638
+- Aggregate pieces created: 42
+- Total padded size planned in this run: 297.42 GiB
+- Aggregate size limit: 32.00 GiB
+- Fully mapped: yes
+```
+
+Use `Fully mapped: yes` as the quick completion check. If it is `no`, the summary includes `Pieces still not aggregated` with the number of committed pieces still missing from the aggregate plan tables. Rerun the same command to continue after an interruption. Do not change `--max-size-bytes` for a retry unless you intend to use a different packing size for pieces that have not been planned yet.
+
 ## Final Output layout
 
 ```text
@@ -123,6 +153,7 @@ node src/index.mjs verify \
 * **One `<dir>` per client.** The output directory is the unit of "a client's backup". Different clients should run in different directories.
 * **Don't run two backup-helper commands against the same `<dir>` at the same time.** .
 * **`download` uses one local aria2 RPC daemon per run.** By default it picks a free localhost port automatically; you can override it with `--port N` when you need a predictable port for debugging.
-* **`download` performance is tuned for Cloudflare R2-hosted shards.** The aria2 worker saturates bandwidth horizontally via `--max-concurrent-downloads` and uses size-based per-file `split` / `max-connection-per-server` settings. Tune via `--concurrency N`; current default is 50.
+* **`download` performance is tuned for Cloudflare R2-hosted shards.** The aria2 worker saturates bandwidth horizontally via `--max-concurrent-downloads` and uses size-based per-file `split` / `max-connection-per-server` settings. Tune via `--concurrency N`; current default is 30.
 * **Run `verify` only after commit is finalized.** The command is a final correctness check, not a progress monitor. If commit rows are still pending, parked, committing, or failed, the verification state will be `incomplete`.
 * **`verify --foc-api-url` is diagnostic.** The base verification does not require foc-observer. Use the option when missing roots need on-chain context in `verify-report.json`.
+* **`aggregate-plan` is a planner.** It computes aggregate roots and member order from committed PieceCIDs in `tracking.db`, then stores the plan in aggregate tables. It assumes `prepare` and `commit` already validated and committed the sub-pieces. Retry with the same aggregate size; changing the size only affects unplanned pieces and can leave mixed packing sizes in the database.

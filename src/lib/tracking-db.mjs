@@ -470,12 +470,12 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
-  const unplannedCommittedPieceCidsStmt = db.prepare(`
+  const unplannedAvailablePieceCidsStmt = db.prepare(`
     SELECT DISTINCT r.piece_cid
     FROM root_shards AS r
     LEFT JOIN aggregate_sub_pieces AS a
       ON a.sub_piece_cid = r.piece_cid
-    WHERE r.commit_status = '${COMMIT_STATUS.committed}'
+    WHERE r.commit_status != '${COMMIT_STATUS.pending}'
       AND r.piece_cid IS NOT NULL
       AND r.piece_cid > ?
       AND a.sub_piece_cid IS NULL
@@ -495,12 +495,12 @@ export function openTrackingDb(dir) {
     FROM aggregate_sub_pieces
   `)
 
-  const unplannedCommittedPieceCidCountStmt = db.prepare(`
+  const unplannedAvailablePieceCidCountStmt = db.prepare(`
     SELECT COUNT(DISTINCT r.piece_cid) AS n
     FROM root_shards AS r
     LEFT JOIN aggregate_sub_pieces AS a
       ON a.sub_piece_cid = r.piece_cid
-    WHERE r.commit_status = '${COMMIT_STATUS.committed}'
+    WHERE r.commit_status != '${COMMIT_STATUS.pending}'
       AND r.piece_cid IS NOT NULL
       AND a.sub_piece_cid IS NULL
   `)
@@ -818,14 +818,14 @@ export function openTrackingDb(dir) {
     },
 
     /**
-     * List committed piece CIDs that are not already members of any aggregate plan.
+     * List parked-or-beyond piece CIDs that are not already members of any aggregate plan.
      *
      * @param {number} limit
      * @param {string} afterPieceCid
      * @returns {string[]}
      */
-    listUnplannedCommittedPieceCids(limit, afterPieceCid) {
-      return unplannedCommittedPieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid.toString())
+    listUnplannedAvailablePieceCids(limit, afterPieceCid) {
+      return unplannedAvailablePieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid.toString())
     },
 
     /** Count distinct committed piece CIDs. */
@@ -838,9 +838,9 @@ export function openTrackingDb(dir) {
       return Number(aggregateSubPieceCountStmt.get().n || 0)
     },
 
-    /** Count committed piece CIDs that are not present in aggregate plans yet. */
-    countUnplannedCommittedPieceCids() {
-      return Number(unplannedCommittedPieceCidCountStmt.get().n || 0)
+    /** Count parked-or-beyond piece CIDs not yet present in any aggregate plan. */
+    countUnplannedAvailablePieceCids() {
+      return Number(unplannedAvailablePieceCidCountStmt.get().n || 0)
     },
 
     /**

@@ -131,11 +131,11 @@ export async function runAggregatePlan({ dir, maxSizeBytes }) {
 
   const committedPieceCount = tracking.countCommittedPieceCids()
   const aggregateSubPieceCountBefore = tracking.countAggregateSubPieceCids()
-  const unplannedPieceCountBefore = tracking.countUnplannedCommittedPieceCids()
+  const unplannedPieceCountBefore = tracking.countUnplannedAvailablePieceCids()
 
   try {
     while (true) {
-      const pieceCids = tracking.listUnplannedCommittedPieceCids(AGGREGATE_DB_BATCH_SIZE, afterPieceCid)
+      const pieceCids = tracking.listUnplannedAvailablePieceCids(AGGREGATE_DB_BATCH_SIZE, afterPieceCid)
       if (pieceCids.length === 0) break
 
       for (const pieceCid of pieceCids) {
@@ -146,7 +146,7 @@ export async function runAggregatePlan({ dir, maxSizeBytes }) {
       renderProgressLine(
         `Planning aggregate pieces: - checked ${formatCount(scannedPieces)} of ${formatCount(
           unplannedPieceCountBefore,
-        )} unplanned committed pieces - aggregate pieces created: ${formatCount(aggregateCount)} - current aggregate: ${formatSize(
+        )} unplanned available pieces - aggregate pieces created: ${formatCount(aggregateCount)} - current aggregate: ${formatSize(
           aggregateUsedBytes,
         )} of ${formatSize(aggregateSizeBytes)}`,
       )
@@ -159,21 +159,21 @@ export async function runAggregatePlan({ dir, maxSizeBytes }) {
         .slice(0, 5)
         .map((piece) => piece.pieceCid)
         .join(', ')
-      throw new Error(`aggregate-plan completed with ${oversizedPieces.length} oversized committed pieces: ${examples}`)
+      throw new Error(`aggregate-plan completed with ${oversizedPieces.length} oversized pieces: ${examples}`)
     }
   } catch (err) {
     tracking.close()
     throw err
   }
 
-  const unplannedPieceCountAfter = tracking.countUnplannedCommittedPieceCids()
+  const unplannedPieceCountAfter = tracking.countUnplannedAvailablePieceCids()
   tracking.close()
   const fullyMapped = unplannedPieceCountAfter === 0
 
   if (process.stdout.isTTY) process.stdout.write('\n')
 
   console.log('\nSUMMARY:')
-  console.log(`- Committed pieces to aggregate: ${formatCount(committedPieceCount)}`)
+  console.log(`- Available pieces to aggregate: ${formatCount(committedPieceCount)}`)
   if (aggregateSubPieceCountBefore > 0) {
     console.log(`- Pieces already aggregated before this run: ${formatCount(aggregateSubPieceCountBefore)}`)
   }

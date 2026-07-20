@@ -470,6 +470,16 @@ export function openTrackingDb(dir) {
     LIMIT ?
   `)
 
+  const nonPendingPieceCidsStmt = db.prepare(`
+    SELECT DISTINCT piece_cid
+    FROM root_shards
+    WHERE commit_status != '${COMMIT_STATUS.pending}'
+      AND piece_cid IS NOT NULL
+      AND piece_cid > ?
+    ORDER BY piece_cid
+    LIMIT ?
+  `)
+
   const unplannedAvailablePieceCidsStmt = db.prepare(`
     SELECT DISTINCT r.piece_cid
     FROM root_shards AS r
@@ -824,6 +834,18 @@ export function openTrackingDb(dir) {
      * @param {string} afterPieceCid
      * @returns {string[]}
      */
+    /**
+     * List all piece CIDs in root_shards whose commit_status is not pending,
+     * paginated by keyset cursor.
+     *
+     * @param {number} limit
+     * @param {string} afterPieceCid
+     * @returns {string[]}
+     */
+    listNonPendingPieceCids(limit, afterPieceCid) {
+      return nonPendingPieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid.toString())
+    },
+
     listUnplannedAvailablePieceCids(limit, afterPieceCid) {
       return unplannedAvailablePieceCidsStmt.all(afterPieceCid, limit).map((row) => row.piece_cid.toString())
     },

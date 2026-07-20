@@ -54,6 +54,16 @@ The command checks that the input inventory is covered by `tracking.db`, the PDP
 
 If `--foc-api-url` is provided, missing roots are enriched with indexed on-chain metadata from foc-observer. This helps distinguish roots that were committed on-chain but are not served by the provider from roots whose commit metadata is missing or points at a different IPFS root CID.
 
+* **`prepare-secondy-copy`** — Collects all piece CIDs from `tracking.db` whose `commit_status` is not `pending` (i.e. parked, committing, committed, or failed) and passes them to an external Curio binary for secondary copy preparation. The binary writes its result to:
+
+  ```
+  <dir>/secondary-copy-pieces.json
+  ```
+
+  The command validates the result file and logs a summary. It does not modify `tracking.db`.
+
+  > **TODO:** the Curio toolbox subcommand name and its accepted flags are not yet confirmed. See the `CURIO_SUBCOMMAND` constant and the `// TODO` comments in `commands/prepare-secondy-copy.mjs`.
+
 * **`aggregate-plan`** — Plans aggregate PieceCID submissions from pieces in `tracking.db` that are at least parked.
 
 Run this once pieces are parked (or further along: committing, committed, or failed). The command reads PieceCIDs whose `commit_status` is not `pending` and that are not already present in `aggregate_sub_pieces`, derives piece sizes from the PieceCID, then greedily packs those pieces into aggregate groups capped by padded size. It stores planned aggregate roots and ordered sub-pieces back into `tracking.db`. It does not read CAR files or write aggregate CAR bytes.
@@ -101,6 +111,20 @@ node src/index.mjs verify \
   [--foc-api-url https://...]
 ```
 
+## Secondary copy workflow
+
+> **TODO:** the Curio subcommand interface is not yet confirmed. Update `--target` and any other flags once known.
+
+Run after pieces are at least parked. The command exports every non-pending piece CID and hands them to Curio for secondary copy preparation.
+
+```sh
+node src/index.mjs prepare-secondy-copy \
+  --dir <output-dir> \
+  --target <TODO>
+```
+
+The result is written to `<dir>/secondary-copy-pieces.json`.
+
 ## Aggregate planning workflow
 
 Use this once pieces are parked (you do not need to wait for `commit` to finish). The SP can plan aggregates in parallel with on-chain commits. The command packs available pieces into groups capped at 32 GiB padded size by default. The command is retryable when rerun with the same `--max-size-bytes`: already planned sub-pieces are skipped, and newly available unplanned pieces keep being inserted.
@@ -132,6 +156,7 @@ Use `Fully mapped: yes` as the quick completion check. If it is `no`, the summar
   manifest.aria2          # one entry per unique shard_cid across all spaces
   tracking.db             # SQLite: shards + root_shards + download/prepare/commit state
   verify-report.json      # written by verify with inventory, piece, and root results
+  secondary-copy-pieces.json  # written by prepare-secondy-copy; result from Curio binary (TODO: format TBC)
   aria2.session           # written by aria2 during downloads
   shards/
     <pieceCID>.car        # one prepared CAR per unique pieceCID

@@ -54,15 +54,19 @@ The command checks that the input inventory is covered by `tracking.db`, the PDP
 
 If `--foc-api-url` is provided, missing roots are enriched with indexed on-chain metadata from foc-observer. This helps distinguish roots that were committed on-chain but are not served by the provider from roots whose commit metadata is missing or points at a different IPFS root CID.
 
-* **`prepare-secondy-copy`** — Collects all piece CIDs from `tracking.db` whose `commit_status` is not `pending` (i.e. parked, committing, committed, or failed) and passes them to an external Curio binary for secondary copy preparation. The binary writes its result to:
+* **`prepare-secondy-copy`** — Collects all piece CIDs from `tracking.db` whose `commit_status` is not `pending` (parked, committing, committed, or failed), writes them to `<dir>/secondary-copy-input.txt` (one PieceCIDv2 per line), and invokes:
 
+  ```bash
+  curio toolbox aggregate-pieces \
+    --input <dir>/secondary-copy-input.txt \
+    --source <curio-source-storage> \
+    --target <curio-target-storage> \
+    --result <dir>/secondary-copy-pieces.json
   ```
-  <dir>/secondary-copy-pieces.json
-  ```
 
-  The command validates the result file and logs a summary. It does not modify `tracking.db`.
+  The binary packs the input pieces into aggregate pieces up to 1 GiB padded size using the [poDSI (FRC-0058)](https://github.com/filecoin-project/FIPs/blob/master/FRCs/frc-0058.md) approach. It stores deterministic resume state under `<target>/storacha-aggregate-work/<input-sha256>`, so re-running the command picks up where it left off.
 
-  > **TODO:** the Curio toolbox subcommand name and its accepted flags are not yet confirmed. See the `CURIO_SUBCOMMAND` constant and the `// TODO` comments in `commands/prepare-secondy-copy.mjs`.
+  The result is written to `<dir>/secondary-copy-pieces.json` and validated. The command exits non-zero if the binary reports an error — re-run until it exits cleanly. Completed aggregates are present in the result file even on partial runs. The command does not modify `tracking.db`.
 
 * **`aggregate-plan`** — Plans aggregate PieceCID submissions from pieces in `tracking.db` that are at least parked.
 
@@ -113,17 +117,16 @@ node src/index.mjs verify \
 
 ## Secondary copy workflow
 
-> **TODO:** the Curio subcommand interface is not yet confirmed. Update `--target` and any other flags once known.
-
-Run after pieces are at least parked. The command exports every non-pending piece CID and hands them to Curio for secondary copy preparation.
+Run after pieces are at least parked. The command is retryable — re-run it until it exits cleanly. Each run resumes from Curio's work directory, so no work is lost on partial runs.
 
 ```sh
 node src/index.mjs prepare-secondy-copy \
   --dir <output-dir> \
-  --target <TODO>
+  --source /path/to/curio-source-storage \
+  --target /path/to/curio-target-storage
 ```
 
-The result is written to `<dir>/secondary-copy-pieces.json`.
+On each invocation (including failed ones), completed aggregates are written to `<dir>/secondary-copy-pieces.json`. The command exits non-zero if the binary reports an error; check the error message and re-run.
 
 ## Aggregate planning workflow
 
@@ -156,7 +159,8 @@ Use `Fully mapped: yes` as the quick completion check. If it is `no`, the summar
   manifest.aria2          # one entry per unique shard_cid across all spaces
   tracking.db             # SQLite: shards + root_shards + download/prepare/commit state
   verify-report.json      # written by verify with inventory, piece, and root results
-  secondary-copy-pieces.json  # written by prepare-secondy-copy; result from Curio binary (TODO: format TBC)
+  secondary-copy-input.txt    # written by prepare-secondy-copy; one PieceCIDv2 per line, input to Curio binary
+  secondary-copy-pieces.json  # written by curio toolbox aggregate-pieces; aggregate result per run
   aria2.session           # written by aria2 during downloads
   shards/
     <pieceCID>.car        # one prepared CAR per unique pieceCID

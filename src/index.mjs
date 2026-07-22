@@ -39,7 +39,7 @@ function usage() {
   backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
   backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]
   backup-helper aggregate-plan --dir <output-dir> [--max-size-bytes N]
-  backup-helper prepare-secondy-copy --dir <output-dir> --target <curio-target>`)
+  backup-helper prepare-secondy-copy --dir <output-dir> --source <curio-source-storage> --target <curio-target-storage>`)
 }
 
 /**
@@ -248,6 +248,7 @@ async function prepareSecondaryCopy(argv) {
       args: argv,
       options: {
         dir: { type: 'string' },
+        source: { type: 'string' },
         target: { type: 'string' },
       },
       allowPositionals: false,
@@ -258,6 +259,10 @@ async function prepareSecondaryCopy(argv) {
     process.exit(1)
   }
 
+  if (!values.source) {
+    console.error('Error: prepare-secondy-copy: missing required --source argument')
+    process.exit(1)
+  }
   if (!values.target) {
     console.error('Error: prepare-secondy-copy: missing required --target argument')
     process.exit(1)
@@ -265,6 +270,7 @@ async function prepareSecondaryCopy(argv) {
 
   await runPrepareSecondaryCopy({
     dir: requireDir(values.dir, 'prepare-secondy-copy'),
+    source: values.source,
     target: values.target,
   })
 }

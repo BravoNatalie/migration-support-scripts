@@ -24,6 +24,12 @@ export const shardsDir = (dir) => path.join(dir, 'shards')
 /** @param {string} dir */
 export const parkingResultsDir = (dir) => path.join(dir, 'parking-results')
 
+/** @param {string} dir */
+export const secondaryCopyInputPath = (dir) => path.join(dir, 'secondary-copy-input.txt')
+
+/** @param {string} dir */
+export const secondaryCopyResultPath = (dir) => path.join(dir, 'secondary-copy-pieces.json')
+
 /**
  * @param {string} dir
  * @param {string} shardCid

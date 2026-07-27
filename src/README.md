@@ -54,6 +54,20 @@ The command checks that the input inventory is covered by `tracking.db`, the PDP
 
 If `--foc-api-url` is provided, missing roots are enriched with indexed on-chain metadata from foc-observer. This helps distinguish roots that were committed on-chain but are not served by the provider from roots whose commit metadata is missing or points at a different IPFS root CID.
 
+* **`prepare-secondy-copy`** — Collects all piece CIDs from `tracking.db` whose `commit_status` is not `pending` (parked, committing, committed, or failed), writes them to `<dir>/secondary-copy-input.txt` (one PieceCIDv2 per line), and invokes:
+
+  ```bash
+  curio toolbox aggregate-pieces \
+    --input <dir>/secondary-copy-input.txt \
+    --source <curio-source-storage> \
+    --target <curio-target-storage> \
+    --result <dir>/secondary-copy-pieces.json
+  ```
+
+  The binary packs the input pieces into aggregate pieces up to 1 GiB padded size using the [poDSI (FRC-0058)](https://github.com/filecoin-project/FIPs/blob/master/FRCs/frc-0058.md) approach. It stores deterministic resume state under `<target>/storacha-aggregate-work/<input-sha256>`, so re-running the command picks up where it left off.
+
+  The result is written to `<dir>/secondary-copy-pieces.json` and validated. The command exits non-zero if the binary reports an error — re-run until it exits cleanly. Completed aggregates are present in the result file even on partial runs. The command does not modify `tracking.db`.
+
 * **`aggregate-plan`** — Plans aggregate PieceCID submissions from pieces in `tracking.db` that are at least parked.
 
 Run this once pieces are parked (or further along: committing, committed, or failed). The command reads PieceCIDs whose `commit_status` is not `pending` and that are not already present in `aggregate_sub_pieces`, derives piece sizes from the PieceCID, then greedily packs those pieces into aggregate groups capped by padded size. It stores planned aggregate roots and ordered sub-pieces back into `tracking.db`. It does not read CAR files or write aggregate CAR bytes.
@@ -101,6 +115,19 @@ node src/index.mjs verify \
   [--foc-api-url https://...]
 ```
 
+## Secondary copy workflow
+
+Run after pieces are at least parked. The command is retryable — re-run it until it exits cleanly. Each run resumes from Curio's work directory, so no work is lost on partial runs.
+
+```sh
+node src/index.mjs prepare-secondy-copy \
+  --dir <output-dir> \
+  --source /path/to/curio-source-storage \
+  --target /path/to/curio-target-storage
+```
+
+On each invocation (including failed ones), completed aggregates are written to `<dir>/secondary-copy-pieces.json`. The command exits non-zero if the binary reports an error; check the error message and re-run.
+
 ## Aggregate planning workflow
 
 Use this once pieces are parked (you do not need to wait for `commit` to finish). The SP can plan aggregates in parallel with on-chain commits. The command packs available pieces into groups capped at 32 GiB padded size by default. The command is retryable when rerun with the same `--max-size-bytes`: already planned sub-pieces are skipped, and newly available unplanned pieces keep being inserted.
@@ -132,6 +159,8 @@ Use `Fully mapped: yes` as the quick completion check. If it is `no`, the summar
   manifest.aria2          # one entry per unique shard_cid across all spaces
   tracking.db             # SQLite: shards + root_shards + download/prepare/commit state
   verify-report.json      # written by verify with inventory, piece, and root results
+  secondary-copy-input.txt    # written by prepare-secondy-copy; one PieceCIDv2 per line, input to Curio binary
+  secondary-copy-pieces.json  # written by curio toolbox aggregate-pieces; aggregate result per run
   aria2.session           # written by aria2 during downloads
   shards/
     <pieceCID>.car        # one prepared CAR per unique pieceCID

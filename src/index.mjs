@@ -26,6 +26,7 @@ import { runCommit } from './commands/commit.mjs'
 import { runCreate } from './commands/create.mjs'
 import { runDownload } from './commands/download.mjs'
 import { runPrepare } from './commands/prepare.mjs'
+import { runPrepareSecondaryCopy } from './commands/prepare-secondy-copy.mjs'
 import { runRemovePieces } from './commands/remove-pieces.mjs'
 import { runReportDuplicates } from './commands/report-duplicates.mjs'
 import { runVerify } from './commands/verify.mjs'
@@ -37,7 +38,8 @@ function usage() {
   backup-helper prepare  --dir <output-dir> [--concurrency N]
   backup-helper commit   --dir <output-dir> --target <curio-piece-dir> --service-url https://... --provider-address 0x... --session-key 0x... --customer-wallet 0x... [--network mainnet|calibration] [--concurrency N] [--retry]
   backup-helper verify   --db <space-inventory.db> --dir <output-dir> [--network mainnet|calibration] [--concurrency N] [--foc-api-url https://...]
-  backup-helper aggregate-plan --dir <output-dir> [--max-size-bytes N]`)
+  backup-helper aggregate-plan --dir <output-dir> [--max-size-bytes N]
+  backup-helper prepare-secondy-copy --dir <output-dir> --source <curio-source-storage> --target <curio-target-storage>`)
 }
 
 /**
@@ -233,6 +235,43 @@ async function prepare(argv) {
   await runPrepare({
     dir: requireDir(values.dir, 'prepare'),
     concurrency,
+  })
+}
+
+/**
+ * @param {string[]} argv
+ */
+async function prepareSecondaryCopy(argv) {
+  let values
+  try {
+    ;({ values } = parseArgs({
+      args: argv,
+      options: {
+        dir: { type: 'string' },
+        source: { type: 'string' },
+        target: { type: 'string' },
+      },
+      allowPositionals: false,
+      strict: true,
+    }))
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
+  if (!values.source) {
+    console.error('Error: prepare-secondy-copy: missing required --source argument')
+    process.exit(1)
+  }
+  if (!values.target) {
+    console.error('Error: prepare-secondy-copy: missing required --target argument')
+    process.exit(1)
+  }
+
+  await runPrepareSecondaryCopy({
+    dir: requireDir(values.dir, 'prepare-secondy-copy'),
+    source: values.source,
+    target: values.target,
   })
 }
 
@@ -462,6 +501,9 @@ async function main() {
       break
     case 'aggregate-plan':
       await aggregatePlan(rest)
+      break
+    case 'prepare-secondy-copy':
+      await prepareSecondaryCopy(rest)
       break
     default:
       usage()
